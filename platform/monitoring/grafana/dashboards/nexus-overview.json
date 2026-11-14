@@ -1,0 +1,94 @@
+{
+  "title": "Nexus AI – Platform Overview",
+  "uid": "nexus-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "API Request Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_requests_total{job=\"nexus-backend\"}[1m])",
+          "legendFormat": "{{method}} {{route}} {{status_code}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "API P95 Latency (ms)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"nexus-backend\"}[5m])) * 1000",
+          "legendFormat": "p95 {{route}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Error Rate",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "rate(http_requests_total{job=\"nexus-backend\",status_code=~\"5..\"}[1m])",
+          "legendFormat": "5xx errors"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Active Ingestion Workers",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 8, "w": 6, "h": 8 },
+      "targets": [
+        {
+          "expr": "celery_workers_active{job=\"nexus-worker\"}",
+          "legendFormat": "Active Workers"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Ingestion Queue Depth",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 8, "w": 6, "h": 8 },
+      "targets": [
+        {
+          "expr": "celery_queue_length{queue=\"ingestion\"}",
+          "legendFormat": "Queue Depth"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "PostgreSQL Connections",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "pg_stat_activity_count{job=\"postgres\"}",
+          "legendFormat": "Active Connections"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Redis Memory Usage",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 16, "w": 12, "h": 8 },
+      "targets": [
+        {
+          "expr": "redis_memory_used_bytes{job=\"redis\"}",
+          "legendFormat": "Memory Used"
+        }
+      ]
+    }
+  ]
+}

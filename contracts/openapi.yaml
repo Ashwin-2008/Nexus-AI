@@ -1,0 +1,370 @@
+﻿openapi: 3.0.3
+info:
+  title: NEXUS AI API
+  version: 0.4.0
+  description: API contract for NEXUS AI (incremental). Milestone 1 auth security additions (refresh/logout/password policy, token pair) plus prior health/metrics/doc ingestion. RAG/chat/sources not implemented.
+servers:
+  - url: http://localhost:8000
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+            details: {}
+          required: [code, message]
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        services:
+          type: object
+          additionalProperties: { type: string }
+          description: "Service checks may include api,database,redis,qdrant,storage,worker"
+      required: [status, services]
+    UserCreate:
+      type: object
+      required: [email, password, organization_name]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, minLength: 8 }
+        full_name: { type: string, nullable: true }
+        organization_name: { type: string }
+    UserLogin:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string }
+    UserRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        full_name: { type: string, nullable: true }
+        is_active: { type: boolean }
+        organization_id: { type: string, format: uuid }
+        role: { type: string }
+        created_at: { type: string, format: date-time }
+    Token:
+      type: object
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, example: bearer }
+        refresh_token: { type: string, nullable: true }
+      required: [access_token, token_type]
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    LogoutRequest:
+      type: object
+      properties:
+        refresh_token: { type: string, nullable: true }
+        all_sessions: { type: boolean, default: false }
+    Message:
+      type: object
+      properties:
+        message: { type: string }
+    IngestionJobRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed, retrying] }
+        attempt: { type: integer }
+        max_attempts: { type: integer }
+        task_id: { type: string, nullable: true }
+        worker: { type: string, nullable: true }
+        error_message: { type: string, nullable: true }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DocumentRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        uploaded_by: { type: string, format: uuid, nullable: true }
+        filename: { type: string }
+        content_type: { type: string }
+        file_size: { type: integer }
+        storage_backend: { type: string, nullable: true }
+        status: { type: string, enum: [pending, processing, completed, failed] }
+        error_message: { type: string, nullable: true }
+        retry_count: { type: integer }
+        metadata: { type: object, nullable: true }
+        latest_job: { $ref: '#/components/schemas/IngestionJobRead', nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DocumentList:
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/DocumentRead' }
+paths:
+  /:
+    get:
+      summary: Root status
+      responses:
+        '200':
+          description: Service status
+  /api/v1/health:
+    get:
+      summary: Health check
+      responses:
+        '200':
+          description: Health status with dependency checks
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition format
+          content:
+            text/plain:
+              schema:
+                type: string
+  /api/v1/auth/register:
+    post:
+      summary: Register user and organization
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserCreate' }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserRead' }
+        '400':
+          description: Validation/policy error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Conflict
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/auth/login:
+    post:
+      summary: Login (returns access + refresh token)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserLogin' }
+      responses:
+        '200':
+          description: Token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/auth/refresh:
+    post:
+      summary: Rotate refresh token and issue new access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RefreshRequest' }
+      responses:
+        '200':
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Token' }
+        '401':
+          description: Invalid/revoked/expired refresh token
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/auth/logout:
+    post:
+      summary: Logout (revoke refresh token/session)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LogoutRequest' }
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/auth/me:
+    get:
+      summary: Current user
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Current user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserRead' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/upload:
+    post:
+      summary: Upload document (compatibility alias for /api/v1/documents/upload)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Document created and queued for ingestion
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentRead' }
+        '400':
+          description: Invalid file
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/documents/upload:
+    post:
+      summary: Upload document (PDF/DOCX/TXT/CSV/Excel)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Document created and queued for ingestion
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentRead' }
+        '400':
+          description: Invalid file
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/documents:
+    get:
+      summary: List documents for current organization
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Document list
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentList' }
+  /api/v1/documents/{document_id}:
+    get:
+      summary: Get document by id (org-isolated)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentRead' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/documents/{document_id}/retry:
+    post:
+      summary: Retry document ingestion (failed/completed)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Requeued
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DocumentRead' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Not retryable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
