@@ -15,6 +15,8 @@ os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
 os.environ.setdefault("INGESTION_USE_CELERY", "false")
 os.environ.setdefault("STORAGE_BACKEND", "local")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
+os.environ.setdefault("VECTOR_INDEX_BACKEND", "memory")
+os.environ.setdefault("EMBEDDING_PROVIDER", "hashing")
 
 from app.core.config import settings  # noqa: E402
 

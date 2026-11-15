@@ -10,9 +10,11 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.document import Document, DocumentStatus, IngestionJob, IngestionJobStatus
-from app.services.processing import ProcessingContext, build_default_pipeline
+from app.models.document import Document, DocumentChunk, DocumentStatus, IngestionJob, IngestionJobStatus
+from app.services.embeddings import EmbeddingError, get_embedding_provider, provider_info
+from app.services.processing import Chunker, ExtractionError, FileExtractor, ProcessingContext, TextNormalizer
 from app.services.storage import StorageError, StorageUnavailableError, build_document_key, get_storage_backend
+from app.services.vector_index import VectorIndexError, get_vector_index
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
 ALLOWED_CONTENT_TYPES = {
@@ -225,8 +227,6 @@ def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID 
         data = load_document_bytes(doc.storage_path, getattr(doc, "storage_backend", None))
         meta = extract_metadata_from_bytes(data, doc.storage_path, doc.filename, doc.content_type)
 
-        # Processing foundation (modular placeholders; RAG not implemented)
-        pipeline = build_default_pipeline()
         ctx = ProcessingContext(
             document_id=str(doc.id),
             organization_id=str(doc.organization_id),
@@ -235,12 +235,58 @@ def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID 
             storage_path=doc.storage_path,
             storage_backend=getattr(doc, "storage_backend", "local"),
         )
-        extracted = pipeline["extractor"].extract(data, ctx)
-        normalized = pipeline["normalizer"].normalize(extracted)
-        chunks = pipeline["chunker"].chunk(normalized)
-        embeddings = pipeline["embedder"].embed([c.get("text", "") for c in chunks]) if chunks else []
-        pipeline["index"].upsert(str(doc.id), chunks, embeddings)
-        meta["processing"] = {"chunks": len(chunks), "embeddings": len(embeddings), "indexed": False}
+        extractor = FileExtractor()
+        extracted = extractor.extract(data, ctx)
+        for warning in extracted.warnings:
+            meta.setdefault("extraction_warnings", []).append(warning)
+        normalized = TextNormalizer().normalize(extracted)
+        chunker = Chunker(chunk_size=settings.chunk_size, overlap=settings.chunk_overlap)
+        chunks = chunker.chunk(
+            normalized, document_id=str(doc.id), organization_id=str(doc.organization_id)
+        )
+        if not chunks:
+            raise ExtractionError("Document produced no extractable text chunks")
+
+        # Embed. Failures propagate to the job failure path (no silent skip).
+        embedding_provider = get_embedding_provider()
+        vectors = embedding_provider.embed([c["text"] for c in chunks])
+        if len(vectors) != len(chunks):
+            raise EmbeddingError(
+                f"embedding count mismatch: {len(chunks)} chunks, {len(vectors)} vectors"
+            )
+
+        # Index into Qdrant (real operations; org-scoped payloads).
+        index = get_vector_index(dimensions=embedding_provider.dimensions)
+        indexed_count = index.upsert_chunks(chunks, vectors)
+
+        # Persist chunks (idempotent re-index: replace all chunks for this document).
+        db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
+        emb_info = provider_info()
+        now = datetime.now(timezone.utc)
+        for chunk in chunks:
+            db.add(
+                DocumentChunk(
+                    id=uuid.UUID(chunk["chunk_id"]),
+                    document_id=doc.id,
+                    organization_id=doc.organization_id,
+                    chunk_index=chunk["index"],
+                    text=chunk["text"],
+                    char_start=chunk.get("char_start", 0),
+                    char_end=chunk.get("char_end", 0),
+                    provenance=json.dumps(chunk.get("provenance", []), ensure_ascii=False),
+                    embedding_provider=emb_info["provider"],
+                    embedding_model=emb_info["model"],
+                    indexed_at=now,
+                )
+            )
+        meta["processing"] = {
+            "chunks": len(chunks),
+            "embeddings": len(vectors),
+            "indexed": True,
+            "index_backend": index.name,
+            "embedding_provider": emb_info["provider"],
+            "embedding_model": emb_info["model"],
+        }
 
         doc.doc_metadata = metadata_to_json(meta)
         doc.status = DocumentStatus.completed

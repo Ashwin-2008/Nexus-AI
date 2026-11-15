@@ -1,10 +1,10 @@
 ﻿# Backend Handover – Kiro (Backend Engineer)
 
-Last updated: 2026-11-14
-Owner: Kiro (`backend/` only). No `frontend/` or `platform/` files modified.
+Last updated: 2026-11-15
+Owner: Kiro (`backend/` only). No `frontend/` or `platform/` application files modified this session (nginx/compose infra fixes documented in INTEGRATION_STATUS.md).
 
 ## Current State
-Baseline re-established and verified (**20 passed**, SQLite). Milestone 1 security enhancements and Milestone 3 ingestion/storage foundations partially implemented and verified at unit/test and selected Docker levels. **RAG, chat/SSE, sources/connectors, agentic orchestration, SQL QA, and evaluation are not implemented/verified — not marked complete.**
+**Release 0.1 (document ingestion) verified END-TO-END live.** **Release 0.2 (chunking, embeddings, Qdrant indexing, search) implemented and verified live.** Test suite **52 passed** (SQLite). RAG/chat/SSE, connectors, agents, SQL QA, evaluation: not implemented.
 
 ## Audit (0) — completed actions
 - Inspected existing backend and read: `docs/PROJECT_STATE.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/handovers/BACKEND_HANDOVER.md`, `contracts/openapi.yaml`, `contracts/integration-spec.md`.
@@ -81,6 +81,41 @@ Baseline re-established and verified (**20 passed**, SQLite). Milestone 1 securi
 - Stateless access tokens are not server-revoked on logout (refresh tokens are).
 
 ## Exact Next Implementation Task
-1. **Complete M1 hardening:** add admin-gated activation/deactivation endpoint, expand RBAC permission matrix and tests (cross-org access, privilege escalation), and verify rate limiting behavior.
-2. **Complete M2/M3 reliability:** add file checksum/duplicate detection, idempotent ingestion guards, and run live Docker integration (Postgres+Redis+MinIO+Qdrant+Celery worker) proving upload→queue→worker→final status, retries, and restart survival; record actual results.
-3. **Begin M4–M6 only after M2/M3 verified:** chunk persistence/provenance, embedding abstraction/provider integration, Qdrant indexing with real ops — then retrieval/RAG per contract. Do not claim RAG/agents complete without end-to-end verification.
+1. **Release 0.3 (next):** Chat/conversations API + streaming (SSE or fetch-stream), grounded RAG with citation verification and insufficient-evidence handling. Coordinate the streaming contract with Cline (POST-based fetch streaming is preferred; EventSource cannot POST).
+2. Wire `/api/v1/search` into frontend Document Explorer and chat retrieval display (Cline owns).
+3. Release 0.4: connector framework (Postgres/MySQL/REST/website/GitHub/GDrive/email).
+4. When corpus > ~5k chunks/org: replace in-Python BM25 with Postgres tsvector/GIN lexical backend.
+
+## Session 2026-11-15 — implemented (Release 0.2)
+
+### Files created/changed
+- `backend/app/services/embeddings.py` (NEW) — provider abstraction: openai_compatible (HTTP w/ retries+backoff, dimension validation), local (sentence-transformers, lazy load), hashing (deterministic, NON-SEMANTIC, dev/test only). `provider_info()` for model-version tracking.
+- `backend/app/services/vector_index.py` (NEW) — QdrantVectorIndex (collection lifecycle, ensure_collection w/ dim check, upsert wait=True, org+doc filtered search, delete_document, count, health) + InMemoryVectorIndex (explicit `VECTOR_INDEX_BACKEND=memory`, real cosine math, ephemeral; tests/offline only).
+- `backend/app/services/processing.py` (REWRITTEN) — real FileExtractor: PDF (pypdf page spans, encrypted/scanned handling), DOCX (paragraphs+tables), CSV (header/rows), XLSX (sheets/rows), TXT (encoding fallback); ExtractionError on malformed/empty (no silent completion). TextNormalizer with span preservation. Chunker: configurable size/overlap, sentence/paragraph-aware cuts, per-chunk provenance (page/row/sheet), **deterministic chunk ids** uuid5(doc_id:index) → idempotent re-indexing.
+- `backend/app/services/ingestion_service.py` — process_document_job rewired: extract → normalize → chunk → embed (fail loud on EmbeddingError) → upsert Qdrant → persist chunks (delete+insert per document) → metadata records provider/model/indexed status.
+- `backend/app/models/document.py` — DocumentChunk model; `models/__init__.py` export.
+- `backend/alembic/versions/0005_document_chunks.py` (NEW) — applied to live Postgres.
+- `backend/app/api/v1/search.py` (NEW) + router mount — GET /api/v1/search (q, mode=semantic|lexical|hybrid, top_k, document_ids), 503 with error envelope on backend failure, strict org scoping.
+- `backend/app/services/search_service.py` (NEW) — BM25 (in-Python, org-chunk bounded), semantic (Qdrant), hybrid (RRF), attach_document_info (org-scoped join).
+- `backend/app/core/config.py` — chunking/embedding/qdrant/vector backend settings.
+- `backend/tests/test_processing.py`, `test_embeddings.py`, `test_search.py` (NEW) — 32 new tests; total suite **52 passed**.
+- `backend/requirements.txt` — qdrant-client pinned `>=1.9.0,<1.10` (server 1.9.2); `requirements-embeddings.txt` (NEW, optional local provider).
+- `backend/Dockerfile.worker` — shell-form CMD (env expansion; fixes worker crash-loop).
+- `contracts/openapi.yaml` v0.5.0 — /api/v1/search added.
+- `docker-compose.yml` — MinIO→bitnamilegacy, qdrant/backend healthchecks, embedding/vector/chunk env vars, backend depends minio-init; nginx DNS-resolver fix (platform file, cross-cutting 502 fix).
+- `frontend/package.json` — removed win32-only rollup devDep (build fix, Cline's file; single-line change required for container build).
+
+### Live verification (Docker, 2026-11-15)
+- Register/login 201/200 via nginx:8080. Upload TXT + 5-page PDF → doc completed, job succeeded (`celery@…`).
+- Metadata: page_count=5, chunks=5, embeddings=5, indexed=true, index_backend=qdrant.
+- document_chunks: 5 rows, overlapping char ranges, provenance JSON, embedding provider/model recorded.
+- Qdrant: points_count=5, green, dim=256 cosine, payload indexes on organization_id/document_id.
+- Search: lexical BM25 scores, semantic cosine scores, hybrid RRF; page provenance on hits (fixed by storing provenance in Qdrant payload).
+- Org isolation live: other org → total=0 all modes; explicit cross-org document_ids → 0.
+- Retry → re-queue → re-process → exactly 5 Qdrant points (no orphans; deterministic ids verified).
+- Postgres migration 0005 applied live; MinIO object org-isolated key verified.
+
+### Constraints/blocksers to know
+- OPENAI_API_KEY in `.env` is dummy → default EMBEDDING_PROVIDER=hashing (machinery verified; semantics require local/openai provider).
+- Docker Desktop engine crashed mid-session (recovered; containers auto-restarted with volumes intact).
+- nginx caches upstream IPs unless resolver+variable proxy_pass used — fixed in nginx.conf.

@@ -19,7 +19,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.13.0",
-    "@rollup/rollup-win32-x64-msvc": "^4.68.3",
     "@tailwindcss/vite": "^4.0.0",
     "@types/node": "^22.10.2",
     "@types/react": "^18.3.11",

@@ -25,7 +25,8 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:6333/health || exit 1"]
+      # qdrant image ships no curl/wget; use bash /dev/tcp port probe instead
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,16 +48,18 @@ services:
       - nexus-internal
 
   minio:
-    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    # MinIO removed their official images from Docker Hub (2025).
+    # bitnamilegacy/minio is the maintained source currently pullable without auth.
+    image: bitnamilegacy/minio:2024
     restart: unless-stopped
-    command: server /data --console-address ":9001"
+    # Bitnami run.sh executes: minio server --console-address :9001 (default)
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
     volumes:
-      - minio_data:/data
+      - minio_data:/bitnami/minio/data
     healthcheck:
-      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -64,17 +67,20 @@ services:
       - nexus-internal
 
   minio-init:
-    image: minio/mc:RELEASE.2024-01-16T16-06-34Z
+    # Creates the documents bucket and ensures it is private.
+    image: bitnamilegacy/minio-client:2024
     depends_on:
       minio:
         condition: service_healthy
-    entrypoint: >
-      /bin/sh -c "
-        mc alias set local http://minio:9000 ${MINIO_ACCESS_KEY} ${MINIO_SECRET_KEY};
-        mc mb --ignore-existing local/${MINIO_BUCKET:-nexus-documents};
-        mc anonymous set none local/${MINIO_BUCKET:-nexus-documents};
-        echo 'MinIO bucket ready';
-      "
+    entrypoint: ["/bin/bash", "-c"]
+    # Credentials passed via MC_HOST_<alias> env var, not argv (avoids process-list exposure)
+    command: >
+      '/opt/bitnami/minio-client/bin/mc mb --ignore-existing "local/$${MINIO_BUCKET}" &&
+       /opt/bitnami/minio-client/bin/mc anonymous set none "local/$${MINIO_BUCKET}" &&
+       echo "MinIO bucket ready"'
+    environment:
+      MC_HOST_local: http://${MINIO_ACCESS_KEY}:${MINIO_SECRET_KEY}@minio:9000
+      MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
     networks:
       - nexus-internal
 
@@ -101,6 +107,15 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Knowledge indexing (Release 0.2)
+      # EMBEDDING_PROVIDER: openai_compatible|local|hashing — hashing = deterministic
+      # non-semantic vectors for machinery verification; set local (requires
+      # requirements-embeddings.txt) or openai_compatible for real semantics.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
+      VECTOR_INDEX_BACKEND: ${VECTOR_INDEX_BACKEND:-qdrant}
+      CHUNK_SIZE: ${CHUNK_SIZE:-900}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
       postgres:
@@ -112,7 +127,8 @@ services:
       minio:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/v1/health || exit 1"]
+      # backend image installs curl, not wget
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 5
@@ -135,6 +151,12 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # Knowledge indexing (must match backend settings)
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
+      VECTOR_INDEX_BACKEND: ${VECTOR_INDEX_BACKEND:-qdrant}
+      CHUNK_SIZE: ${CHUNK_SIZE:-900}
+      CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:

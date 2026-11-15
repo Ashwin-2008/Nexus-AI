@@ -1,12 +1,26 @@
 ﻿# Nexus AI – Project State
 
-Last updated: 2026-11-14
+Last updated: 2026-11-15
 Updated by: Kiro (Backend)
 
 ## Overall Status
-- Backend: Milestones 1-3 **partially implemented with verified increments**. Full SQLite test suite baseline re-established (**20 passed**). Alembic migrations 0001–0004 verified on Docker PostgreSQL. Async ingestion/storage/processing foundations and auth security enhancements implemented; RAG, chat/SSE, sources/connectors, agents, SQL QA, and evaluation **not implemented/verified**.
-- Frontend: **official implementation is `frontend/` (Cline, in-repo).** Lovable frontend abandoned. Frontend-owned gaps remain; backend must not modify it.
-- Platform: existing infra present; not modified.
+- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) implemented and verified live**. Test suite: **52 passed** (SQLite, 2026-11-15). Live Docker E2E verified: upload → extract (real PDF/DOCX/CSV/XLSX/TXT) → chunk with provenance → persist chunks → embed → index Qdrant → semantic/lexical/hybrid search, org isolation enforced on all paths. RAG/chat/SSE, connectors, agents, SQL QA, evaluation **not implemented**.
+- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. API wiring for new /search endpoint pending.
+- Platform: compose stack runs end-to-end; nginx now re-resolves service IPs (502-on-recreate fix); MinIO images moved to bitnamilegacy (Docker Hub removal).
+
+## Release 0.2 — VERIFIED (2026-11-15, live Docker)
+- Real extraction: `app/services/processing.py` FileExtractor — PDF (pypdf, page spans), DOCX (paragraphs+tables), CSV (rows/header), XLSX (sheets/rows), TXT (encoding fallback). Malformed files raise ExtractionError → job failed (no silent completion).
+- Chunking: configurable size/overlap, sentence/paragraph-aware breaks, per-chunk provenance (page/row/sheet), deterministic chunk IDs (uuid5 of document_id+index) → idempotent re-indexing (verified: re-index leaves exactly 5 points, no orphans).
+- Embeddings: `app/services/embeddings.py` — providers: openai_compatible (HTTP, retries/backoff), local (sentence-transformers, requirements-embeddings.txt), hashing (deterministic, NON-SEMANTIC, dev/test only). Selection via EMBEDDING_PROVIDER. Dimension validation + provider/model tracking persisted per chunk.
+- Qdrant: `app/services/vector_index.py` — collection lifecycle, upsert (wait=True), org+document filtered search, delete, count, health; payload indexes on organization_id/document_id. Client pinned to 1.9.x to match server v1.9.2.
+- Search API: `GET /api/v1/search?q&mode&top_k&document_ids` — lexical (BM25 in-Python over org chunks), semantic (Qdrant), hybrid (RRF). Strictly org-scoped. Contract v0.5.0.
+- Chunk persistence: migration 0005 `document_chunks` (applied to live Postgres), model `DocumentChunk`.
+
+## Live verification evidence (Docker, 2026-11-15)
+- 5-page PDF upload → doc completed; metadata page_count=5; 5 chunks persisted (char ranges overlap correctly); Qdrant points_count=5, status green, collection dim=256 cosine.
+- Search live: lexical scores (BM25), semantic scores (Qdrant cosine), hybrid RRF scores; page provenance on hits.
+- Org isolation live: second org's user gets total=0 on all modes, even with document_ids filter naming org A's document.
+- Retry → re-queue → re-process verified live; deterministic chunk IDs prevent orphaned vectors.
 
 ## Component Status
 
@@ -45,12 +59,15 @@ Updated by: Kiro (Backend)
 | Frontend ↔ Backend | ⏳ pending | Frontend wiring/chat/sources pending; contracts updated |
 
 ## Known Issues / Gaps
-- `auth/register` returns `UserRead` (no token); login/refresh return token pair.
-- Celery enqueue disabled in tests via `INGESTION_USE_CELERY=false` to ensure deterministic SQLite runs; production/compose behavior requires live verification.
-- Chat/SSE, sources, chunk persistence, embeddings, vector indexing, retrieval, citations, RAG answers, agents absent.
+- `auth/register` returns `UserRead` (no token); login/refresh return token pairs.
+- Chat/SSE, sources, citations, RAG answers, agents, SQL QA, evaluation: absent.
+- Default EMBEDDING_PROVIDER=hashing produces NON-semantic vectors — retrieval machinery verified, but real answer quality requires EMBEDDING_PROVIDER=local (install requirements-embeddings.txt) or openai_compatible with a valid key (current .env key is a dummy `sk-...`).
+- Lexical BM25 computed in Python over org chunks (bounded 5000); Postgres tsvector/GIN migration path for large corpora.
+- PDF page-level metadata extraction: page_count verified; page-level text char offsets via spans.
+- OCR for scanned PDFs not implemented (clear ExtractionError raised instead).
 
 ## Next Actions (Backend)
-1. Harden M1: add activation/deactivation endpoint, expand RBAC/permission checks and tests (cross-org/privilege escalation), verify rate limiting.
-2. Harden M2/M3: checksums+duplicate detection, idempotent ingestion, MinIO live ops, Celery worker restart/retry integration tests.
-3. Implement M4–M7 foundations (chunk persistence, embeddings, Qdrant indexing, hybrid retrieval) before any RAG claims.
-4. Coordinate and implement chat/sources contracts with frontend once reconciled.
+1. Release 0.3: chat/conversations API + streaming (SSE), RAG pipeline with citation verification, insufficient-evidence handling. Coordinate streaming contract with Cline.
+2. Wire /search into frontend Document Explorer + chat retrieval display (Cline).
+3. Connector framework (Release 0.4) after 0.3.
+4. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.

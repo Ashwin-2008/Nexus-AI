@@ -1,0 +1,5 @@
+# Optional local semantic embeddings (heavier dependencies, loaded by workers only).
+# Install with: pip install -r requirements-embeddings.txt
+# Provides EMBEDDING_PROVIDER=local — genuinely semantic vectors with no API key.
+sentence-transformers>=3.0.0
+torch>=2.2.0

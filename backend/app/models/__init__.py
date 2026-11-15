@@ -1,4 +1,4 @@
-﻿from app.models.document import Document, DocumentStatus, IngestionJob, IngestionJobStatus
+﻿from app.models.document import Document, DocumentChunk, DocumentStatus, IngestionJob, IngestionJobStatus
 from app.models.user import AuditLog, Organization, RefreshToken, Role, User
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "RefreshToken",
     "AuditLog",
     "Document",
+    "DocumentChunk",
     "DocumentStatus",
     "IngestionJob",
     "IngestionJobStatus",

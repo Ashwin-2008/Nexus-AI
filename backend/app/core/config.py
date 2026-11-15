@@ -41,6 +41,32 @@ class Settings(BaseSettings):
     ingestion_retry_backoff_seconds: int = 30
     ingestion_use_celery: bool = True
 
+    # Chunking
+    chunk_size: int = 900
+    chunk_overlap: int = 150
+
+    # Embeddings: provider = openai_compatible | local | hashing
+    # - openai_compatible: OpenAI-compatible /v1/embeddings endpoint (needs OPENAI_API_KEY)
+    # - local: in-process sentence-transformers model (needs requirements-embeddings.txt)
+    # - hashing: deterministic non-semantic vectors; CI/test machinery only
+    embedding_provider: str = "hashing"
+    embedding_model: str = ""
+    embedding_local_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+    embedding_dimensions: int = 0  # 0 = provider default
+    embedding_batch_size: int = 64
+
+    # LLM (OpenAI-compatible; used by RAG/chat milestones)
+    openai_api_key: str = ""
+    openai_base_url: str = ""
+    llm_model: str = ""
+
+    # Qdrant
+    qdrant_api_key: str = ""
+    qdrant_collection: str = "nexus_chunks"
+    # qdrant = real Qdrant; memory = ephemeral in-process index (tests/offline dev only)
+    vector_index_backend: str = "qdrant"
+    search_top_k: int = 8
+
     # CORS
     cors_origins: str = "http://localhost,http://localhost:3000"
 
