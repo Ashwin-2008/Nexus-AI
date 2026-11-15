@@ -4,7 +4,7 @@ Last updated: 2026-11-15
 Owner: Kiro (`backend/` only). No `frontend/` or `platform/` application files modified this session (nginx/compose infra fixes documented in INTEGRATION_STATUS.md).
 
 ## Current State
-**Release 0.1 (document ingestion) verified END-TO-END live.** **Release 0.2 (chunking, embeddings, Qdrant indexing, search) implemented and verified live.** Test suite **52 passed** (SQLite). RAG/chat/SSE, connectors, agents, SQL QA, evaluation: not implemented.
+**Release 0.1 (document ingestion), Release 0.2 (knowledge indexing + search), and Release 0.3 (grounded RAG + chat streaming) implemented and verified live.** Test suite **61 passed** (SQLite). Connectors, agents, SQL QA, evaluation: not implemented.
 
 ## Audit (0) — completed actions
 - Inspected existing backend and read: `docs/PROJECT_STATE.md`, `docs/SYSTEM_ARCHITECTURE.md`, `docs/DATABASE_SCHEMA.md`, `docs/handovers/BACKEND_HANDOVER.md`, `contracts/openapi.yaml`, `contracts/integration-spec.md`.
@@ -81,10 +81,33 @@ Owner: Kiro (`backend/` only). No `frontend/` or `platform/` application files m
 - Stateless access tokens are not server-revoked on logout (refresh tokens are).
 
 ## Exact Next Implementation Task
-1. **Release 0.3 (next):** Chat/conversations API + streaming (SSE or fetch-stream), grounded RAG with citation verification and insufficient-evidence handling. Coordinate the streaming contract with Cline (POST-based fetch streaming is preferred; EventSource cannot POST).
-2. Wire `/api/v1/search` into frontend Document Explorer and chat retrieval display (Cline owns).
-3. Release 0.4: connector framework (Postgres/MySQL/REST/website/GitHub/GDrive/email).
+1. **Release 0.4 (next):** Connector framework with a consistent interface (Postgres/MySQL/REST/website/GitHub/Google Drive/email), credential management, incremental sync, scheduling, deletion propagation.
+2. Frontend chat wiring (Cline): SSE streaming via fetch + ReadableStream, citations UI, conversation history.
+3. Release 0.5: agent orchestration (LangGraph or justified alternative).
 4. When corpus > ~5k chunks/org: replace in-Python BM25 with Postgres tsvector/GIN lexical backend.
+
+## Session 2026-11-15 (part 2) — Release 0.3 implemented
+
+### Files created/changed
+- `backend/app/services/llm.py` (NEW) — LLMProvider (OpenAI-compatible, streaming/non-streaming, retries, usage/latency tracking); extractive_answer() grounded fallback (verbatim sentences ranked by query-term overlap); all transport failures classified as LLMError.
+- `backend/app/services/rag_service.py` (NEW) — RagPipeline: retrieve (hybrid) → assemble_context (token budget) → build_context_block (provenance-aware) → generate (LLM or extractive) → verify_citations (drops fabricated [n]); SYSTEM_PROMPT with prompt-injection defenses (retrieved content treated as data, never instructions); run() + run_streaming() with graceful degradation.
+- `backend/app/api/v1/chat.py` (NEW) — conversations CRUD, messages history, POST message (stream=true → SSE StreamingResponse; stream=false → JSON). SSE events: message_start/context/token/message_end/error. Assistant message persisted with verified citations + meta (answer_mode, model, latencies, tokens, degraded_from).
+- `backend/app/models/chat.py` (NEW) + `models/__init__.py` — Conversation, ChatMessage.
+- `backend/alembic/versions/0006_chat.py` (NEW) — applied to live Postgres.
+- `backend/app/api/v1/router.py` — chat router mounted.
+- `backend/tests/test_chat_rag.py` (NEW) — 9 tests (conversations CRUD, isolation 404s, grounded answers, insufficient evidence, SSE streaming, cross-org RAG isolation, LLM-failure degradation, citation verification).
+- `contracts/openapi.yaml` v0.6.0 — chat endpoints + ConversationRead/ChatMessageRead schemas.
+- `backend/app/core/config.py` — llm_provider (auto|openai_compatible|extractive), rag_context_token_budget, rag_max_context_chunks.
+
+### Live verification (Docker, 2026-11-15)
+- Conversation create 201; grounded question → answer_mode=extractive (no valid LLM key), answer composed of verbatim retrieved sentences with [n] refs; 5 citations with page provenance from financial-report.pdf.
+- Streaming SSE: message_start → context (retrieval_latency 16ms, 5 chunks) → message_end (citations 5, degraded_from=llm); assistant persisted (2 messages total).
+- Unrelated question → answer_mode=no_evidence, insufficient_evidence=true, zero content leakage.
+- Fixed during verification: LLM streaming transport errors (DNS failure) classified as LLMError; degraded no-evidence flag set correctly.
+
+### Known constraints
+- OPENAI_API_KEY in .env is dummy → llm_available()=True (key present) → live requests attempt LLM first, fail with 401/DNS after ~1s, degrade to extractive. Latency cost acceptable; logged clearly. Set llm_provider=extractive to skip LLM attempts, or provide a real key.
+- RAG answer quality: extractive mode is verbatim passages (real, no fabrication). Semantic quality requires a real LLM+embedding provider.
 
 ## Session 2026-11-15 — implemented (Release 0.2)
 

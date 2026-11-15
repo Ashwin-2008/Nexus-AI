@@ -1,7 +1,7 @@
 ﻿openapi: 3.0.3
 info:
   title: NEXUS AI API
-  version: 0.5.0
+  version: 0.6.0
   description: API contract for NEXUS AI (incremental). Milestone 1 auth security additions (refresh/logout/password policy, token pair) plus prior health/metrics/doc ingestion. RAG/chat/sources not implemented.
 servers:
   - url: http://localhost:8000
@@ -22,6 +22,48 @@ components:
             message: { type: string }
             details: {}
           required: [code, message]
+    ConversationRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        title: { type: string, nullable: true }
+        user_id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, user_id, organization_id, created_at, updated_at]
+    ChatMessageRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        citations:
+          type: array
+          items:
+            type: object
+            properties:
+              index: { type: integer }
+              chunk_id: { type: string, format: uuid }
+              document_id: { type: string, format: uuid }
+              document_filename: { type: string }
+              provenance: { type: array, items: { type: object } }
+              score: { type: number }
+              text: { type: string }
+        meta:
+          type: object
+          properties:
+            answer_mode: { type: string, enum: [llm, extractive, no_evidence] }
+            model: { type: string }
+            retrieval_latency_ms: { type: integer }
+            generation_latency_ms: { type: integer, nullable: true }
+            prompt_tokens: { type: integer, nullable: true }
+            completion_tokens: { type: integer, nullable: true }
+            insufficient_evidence: { type: boolean }
+            degraded_from: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+      required: [id, conversation_id, role, content, created_at]
     HealthResponse:
       type: object
       properties:
@@ -342,6 +384,145 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/chat/conversations:
+    post:
+      summary: Create a chat conversation (user-owned, org-scoped)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                title: { type: string, maxLength: 255 }
+      responses:
+        '201':
+          description: Conversation created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationRead' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    get:
+      summary: List current user's conversations in their organization
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Conversation list (most recently updated first)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ConversationRead' }
+  /api/v1/chat/conversations/{conversation_id}:
+    get:
+      summary: Get conversation (owner + org only; 404 otherwise)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Conversation
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConversationRead' }
+        '404':
+          description: Not found (never 403 — avoids existence leak)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Delete conversation and its messages
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/chat/conversations/{conversation_id}/messages:
+    get:
+      summary: List messages of a conversation (owner + org only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Messages in chronological order
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/ChatMessageRead' }
+    post:
+      summary: Post a message and get a grounded RAG answer
+      description: >
+        Streaming mode (default) responds with text/event-stream events:
+        message_start, context, token (LLM mode only), message_end, error.
+        Frontend clients MUST use fetch() with a ReadableStream (EventSource
+        cannot POST). Non-streaming mode returns the complete assistant
+        message JSON. Answers are grounded in retrieved org-scoped chunks;
+        every citation maps to an actually retrieved chunk; insufficient
+        evidence is reported explicitly (answer_mode=no_evidence,
+        insufficient_evidence=true) instead of invented content. When no LLM
+        is configured or the LLM fails, answers degrade to grounded
+        extractive passages (answer_mode=extractive, model=none) or
+        no_evidence — never fabricated generation.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: conversation_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [content]
+              properties:
+                content: { type: string, minLength: 1, maxLength: 8000 }
+                stream: { type: boolean, default: true }
+      responses:
+        '200':
+          description: >
+            Non-streaming: ChatMessageRead. Streaming: SSE event stream
+            (text/event-stream) — persists the assistant message before
+            closing; clients must also reload messages for full history.
+        '404':
+          description: Conversation not found / not owned
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '503':
+          description: Retrieval backend unavailable
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /api/v1/documents/{document_id}/retry:
     post:
       summary: Retry document ingestion (failed/completed)

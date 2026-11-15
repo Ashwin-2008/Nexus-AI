@@ -4,7 +4,7 @@ Last updated: 2026-11-15
 Updated by: Kiro (Backend)
 
 ## Overall Status
-- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) implemented and verified live**. Test suite: **52 passed** (SQLite, 2026-11-15). Live Docker E2E verified: upload → extract (real PDF/DOCX/CSV/XLSX/TXT) → chunk with provenance → persist chunks → embed → index Qdrant → semantic/lexical/hybrid search, org isolation enforced on all paths. RAG/chat/SSE, connectors, agents, SQL QA, evaluation **not implemented**.
+- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) and Release 0.3 (grounded RAG + chat + streaming) implemented and verified live**. Test suite: **61 passed** (SQLite, 2026-11-15). Live Docker E2E verified: upload → extract → chunk → index → search → grounded chat answers with verified citations. Connectors, agents, SQL QA, evaluation **not implemented**.
 - Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. API wiring for new /search endpoint pending.
 - Platform: compose stack runs end-to-end; nginx now re-resolves service IPs (502-on-recreate fix); MinIO images moved to bitnamilegacy (Docker Hub removal).
 
@@ -21,6 +21,13 @@ Updated by: Kiro (Backend)
 - Search live: lexical scores (BM25), semantic scores (Qdrant cosine), hybrid RRF scores; page provenance on hits.
 - Org isolation live: second org's user gets total=0 on all modes, even with document_ids filter naming org A's document.
 - Retry → re-queue → re-process verified live; deterministic chunk IDs prevent orphaned vectors.
+
+## Release 0.3 — VERIFIED (2026-11-15, live Docker)
+- LLM abstraction `app/services/llm.py`: OpenAI-compatible chat completions (streaming + non-streaming, retries, usage tracking); grounded **extractive fallback** (verbatim retrieved sentences, clearly labeled `answer_mode=extractive`) when no LLM configured or LLM fails — never fabricates.
+- RAG pipeline `app/services/rag_service.py`: hybrid retrieval → context assembly (token budget, RAG_MAX_CONTEXT_CHUNKS) → generation (LLM w/ anti-prompt-injection system prompt) → **citation verification** (fabricated [n] references dropped; every citation maps to a retrieved chunk) → explicit insufficient-evidence handling.
+- Chat API `app/api/v1/chat.py`: conversations CRUD (owner+org scoped, 404 not 403 to avoid existence leak), messages history, POST message with **SSE streaming** (message_start → context → token* → message_end) and non-streaming mode; both user and assistant messages persisted with citations/meta.
+- Migration 0006: conversations, chat_messages (applied to live Postgres).
+- Tests: 61 passed. Live E2E verified: grounded answer with page-provenance citations; streaming event sequence correct; assistant persistence after stream; cross-org questions return explicit no_evidence with zero leakage; LLM-failure degradation labeled (`degraded_from: llm`).
 
 ## Component Status
 
@@ -67,7 +74,7 @@ Updated by: Kiro (Backend)
 - OCR for scanned PDFs not implemented (clear ExtractionError raised instead).
 
 ## Next Actions (Backend)
-1. Release 0.3: chat/conversations API + streaming (SSE), RAG pipeline with citation verification, insufficient-evidence handling. Coordinate streaming contract with Cline.
-2. Wire /search into frontend Document Explorer + chat retrieval display (Cline).
-3. Connector framework (Release 0.4) after 0.3.
+1. Release 0.3 frontend wiring (Cline): chat workspace consumes SSE streaming contract (fetch + ReadableStream POST), citations display, conversation history.
+2. Release 0.4: connector framework (Postgres/MySQL/REST/website/GitHub/GDrive/email).
+3. Release 0.5: agent orchestration (supervisor/document/SQL/connector/analytics/verification agents).
 4. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.

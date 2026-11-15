@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = ""
     llm_model: str = ""
+    # openai_compatible | extractive | auto (auto = openai_compatible when key present, else extractive)
+    llm_provider: str = "auto"
+    rag_context_token_budget: int = 6000
+    rag_max_context_chunks: int = 8
 
     # Qdrant
     qdrant_api_key: str = ""

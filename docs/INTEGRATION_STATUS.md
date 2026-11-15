@@ -32,7 +32,7 @@ Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
 | Cross-org document access | ✅ | 404 (not leaked), list empty, retry denied |
 | Frontend build (type-check/lint/build) | ✅ | Clean (2026-11-15) |
 | Frontend ↔ Backend /search wiring | ⏳ | Search API not yet consumed by frontend |
-| Chat/RAG streaming | ⏳ | Release 0.3 — backend not implemented |
+| Chat/RAG streaming | ✅ backend verified live | SSE streaming + grounded citations; frontend chat wiring pending |
 | Connectors / agents / SQL QA | ⏳ | Release 0.4/0.5 — not implemented |
 
 ## Infrastructure Fixes Applied (2026-11-15)

@@ -1,4 +1,5 @@
-﻿from app.models.document import Document, DocumentChunk, DocumentStatus, IngestionJob, IngestionJobStatus
+﻿from app.models.chat import ChatMessage, Conversation
+from app.models.document import Document, DocumentChunk, DocumentStatus, IngestionJob, IngestionJobStatus
 from app.models.user import AuditLog, Organization, RefreshToken, Role, User
 
 __all__ = [
@@ -12,4 +13,6 @@ __all__ = [
     "DocumentStatus",
     "IngestionJob",
     "IngestionJobStatus",
+    "Conversation",
+    "ChatMessage",
 ]
