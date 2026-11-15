@@ -31,8 +31,9 @@ Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
 | Retry → re-index idempotency | ✅ | Deterministic chunk ids; re-index leaves exactly 5 points, no orphans |
 | Cross-org document access | ✅ | 404 (not leaked), list empty, retry denied |
 | Frontend build (type-check/lint/build) | ✅ | Clean (2026-11-15) |
+| Frontend chat wiring (F6) | ✅ | chat.tsx consumes conversations CRUD + POST SSE streaming (fetch ReadableStream) via src/api.ts; served bundle verified live |
 | Frontend ↔ Backend /search wiring | ⏳ | Search API not yet consumed by frontend |
-| Chat/RAG streaming | ✅ backend verified live | SSE streaming + grounded citations; frontend chat wiring pending |
+| Chat/RAG streaming | ✅ backend verified live | SSE streaming + grounded citations; frontend chat page wired (2026-11-15) |
 | Connectors / agents / SQL QA | ⏳ | Release 0.4/0.5 — not implemented |
 
 ## Infrastructure Fixes Applied (2026-11-15)
@@ -65,3 +66,5 @@ Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
 | 2025-01-01..03 | Initial reconciliation, IC-001..024 | Amazon Q |
 | 2026-11-14 | IC-005..024 resolved by Cline/Kiro (frontend builds clean, backend suite 20 passed) | Cline/Kiro |
 | 2026-11-15 | Release 0.2 implemented + live-verified (extraction/chunking/embeddings/Qdrant/search); infra fixes above; contract v0.5.0; suite 52 passed | Kiro |
+| 2026-11-15 | Release 0.3 implemented + live-verified (RAG/chat/SSE); contract v0.6.0; suite 61 passed | Kiro |
+| 2026-11-15 | Frontend chat wiring (F6): pages/chat.tsx rewritten against chat API (conversations, streaming, citations, answer_mode, insufficient-evidence, errors); api.ts SSE client; type-check/lint/build clean; live-served bundle + full UI request cycle verified through nginx:8080 | Kiro (frontend fill-in; Cline owns `frontend/`) |

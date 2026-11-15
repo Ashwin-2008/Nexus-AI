@@ -5,7 +5,7 @@ Updated by: Kiro (Backend)
 
 ## Overall Status
 - Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) and Release 0.3 (grounded RAG + chat + streaming) implemented and verified live**. Test suite: **61 passed** (SQLite, 2026-11-15). Live Docker E2E verified: upload → extract → chunk → index → search → grounded chat answers with verified citations. Connectors, agents, SQL QA, evaluation **not implemented**.
-- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. API wiring for new /search endpoint pending.
+- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. **Chat workspace wired to backend chat/SSE API (2026-11-15):** conversation sidebar, streaming answers, citations with page provenance, answer_mode labeling, insufficient-evidence state. /search endpoint UI consumption still pending.
 - Platform: compose stack runs end-to-end; nginx now re-resolves service IPs (502-on-recreate fix); MinIO images moved to bitnamilegacy (Docker Hub removal).
 
 ## Release 0.2 — VERIFIED (2026-11-15, live Docker)
@@ -74,7 +74,7 @@ Updated by: Kiro (Backend)
 - OCR for scanned PDFs not implemented (clear ExtractionError raised instead).
 
 ## Next Actions (Backend)
-1. Release 0.3 frontend wiring (Cline): chat workspace consumes SSE streaming contract (fetch + ReadableStream POST), citations display, conversation history.
+1. Release 0.3 frontend wiring ✅ DONE (2026-11-15): chat.tsx rewritten against chat API — conversation sidebar, streaming via fetch ReadableStream, citations + answer_mode display, insufficient-evidence state, error handling; type-check/lint/build clean; live-served bundle + full UI request cycle verified through nginx:8080.
 2. Release 0.4: connector framework (Postgres/MySQL/REST/website/GitHub/GDrive/email).
 3. Release 0.5: agent orchestration (supervisor/document/SQL/connector/analytics/verification agents).
 4. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.
