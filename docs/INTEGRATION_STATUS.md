@@ -32,9 +32,12 @@ Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
 | Cross-org document access | ✅ | 404 (not leaked), list empty, retry denied |
 | Frontend build (type-check/lint/build) | ✅ | Clean (2026-11-15) |
 | Frontend chat wiring (F6) | ✅ | chat.tsx consumes conversations CRUD + POST SSE streaming (fetch ReadableStream) via src/api.ts; served bundle verified live |
-| Frontend ↔ Backend /search wiring | ⏳ | Search API not yet consumed by frontend |
+| Frontend ↔ Backend /search wiring | ✅ | `/app/search` uses typed authenticated `/search` client with selectable retrieval mode |
 | Chat/RAG streaming | ✅ backend verified live | SSE streaming + grounded citations; frontend chat page wired (2026-11-15) |
-| Connectors / agents / SQL QA | ⏳ | Release 0.4/0.5 — not implemented |
+| Connector backend ↔ frontend | ✅ | `/app/knowledge-sources` uses create/list/test/sync/history/disconnect APIs; provider credentials still required for live external systems |
+| Agent execution foundation | ✅ | Persisted `/agents/executions`, retrieval execution path, bounded read-only SQL tool, audit records, durable steps/events, specialist catalog, and frontend execution/approval history |
+| Durable agent workflow / specialist registry / approvals / SQL NL generation | ✅ | Migrations 0009–0012, database-backed claiming/recovery metadata, approval expiry, cancellation/retry APIs, capability catalog, safe SQL boundary, and frontend controls; live broker validation and full specialist handlers remain follow-up |
+| Connected intelligence APIs | ✅ | Real IMAP search, approval-gated SMTP path, permission-scoped document extraction/comparison, report metadata migration/listing, and PDF/DOCX/XLSX/CSV exports; provider credentials and live external systems remain environment-dependent |
 
 ## Infrastructure Fixes Applied (2026-11-15)
 | Issue | Fix | File |
@@ -68,3 +71,8 @@ Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
 | 2026-11-15 | Release 0.2 implemented + live-verified (extraction/chunking/embeddings/Qdrant/search); infra fixes above; contract v0.5.0; suite 52 passed | Kiro |
 | 2026-11-15 | Release 0.3 implemented + live-verified (RAG/chat/SSE); contract v0.6.0; suite 61 passed | Kiro |
 | 2026-11-15 | Frontend chat wiring (F6): pages/chat.tsx rewritten against chat API (conversations, streaming, citations, answer_mode, insufficient-evidence, errors); api.ts SSE client; type-check/lint/build clean; live-served bundle + full UI request cycle verified through nginx:8080 | Kiro (frontend fill-in; Cline owns `frontend/`) |
+| 2026-11-15 | Frontend source/search integration: typed `/sources` and `/search` clients, operational source management UI, sync history, connector status/error states, and knowledge search page; frontend type-check/lint/build clean; focused backend connector/search tests 33 passed | Copilot |
+| 2026-11-15 | Agent execution foundation: migration 0008, persisted supervisor/retrieval executions, read-only SQL validation/execution tool, org-scoped APIs, audit events, frontend agent history; focused agent tests 3 passed and frontend validation clean | Copilot |
+| 2026-11-15 | Durable agent workflows: migrations 0009–0012, step/event persistence, database-backed claiming/recovery metadata, specialist registry, SQL schema/validation/generation APIs, approval expiry, cancellation/retry lifecycle endpoints, frontend step timeline and approval controls; full backend suite 89 passed and frontend validation clean | Copilot |
+| 2026-11-15 | Connected intelligence: real IMAP email search API, document extraction/comparison API with organization checks, persisted PDF/DOCX/XLSX/CSV report exports/download API, typed frontend clients, QA report and bug register; full backend suite 92 passed | Copilot |
+| 2026-11-15 | Cross-source workflow routing, approval-bound SMTP send path, report metadata migration/listing/download UI, OpenAPI updates, and regression validation; full backend suite 93 passed | Copilot |

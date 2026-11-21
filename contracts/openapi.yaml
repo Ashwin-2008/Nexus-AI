@@ -1,8 +1,8 @@
 ﻿openapi: 3.0.3
 info:
   title: NEXUS AI API
-  version: 0.6.0
-  description: API contract for NEXUS AI (incremental). Milestone 1 auth security additions (refresh/logout/password policy, token pair) plus prior health/metrics/doc ingestion. RAG/chat/sources not implemented.
+  version: 0.7.0
+  description: API contract for NEXUS AI authentication, document ingestion, grounded search/chat, connectors, durable agent workflows, safe SQL intelligence, and approvals.
 servers:
   - url: http://localhost:8000
 components:
@@ -64,6 +64,67 @@ components:
             degraded_from: { type: string, nullable: true }
         created_at: { type: string, format: date-time }
       required: [id, conversation_id, role, content, created_at]
+    SourceCreate:
+      type: object
+      required: [name, type]
+      properties:
+        name: { type: string, maxLength: 255 }
+        type: { type: string, enum: [postgres, mysql, rest, website, github, gdrive, email] }
+        config: { type: object }
+        credentials: { type: object }
+    SourceUpdate:
+      type: object
+      properties:
+        name: { type: string, maxLength: 255 }
+        config: { type: object }
+        credentials: { type: object }
+        status: { type: string, enum: [active, disabled] }
+    SourceRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string }
+        status: { type: string, enum: [active, error, disabled] }
+        config: { type: object }
+        credentials_masked:
+          type: object
+          nullable: true
+          description: Masked credential shape (secrets replaced); full values are never returned
+        last_synced_at: { type: string, format: date-time, nullable: true }
+        last_sync_status: { type: string, nullable: true }
+        last_error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+      required: [id, name, type, status, created_at, updated_at]
+    SyncJobRead:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        data_source_id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, succeeded, failed] }
+        fetched: { type: integer }
+        ingested: { type: integer }
+        skipped: { type: integer }
+        failed: { type: integer }
+        error: { type: string, nullable: true }
+        started_at: { type: string, format: date-time }
+        finished_at: { type: string, format: date-time, nullable: true }
+      required: [id, data_source_id, status, started_at]
+    AgentExecution:
+      type: object
+      required: [id, agent_type, status, request, plan, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        agent_type: { type: string }
+        status: { type: string, enum: [queued, running, succeeded, failed] }
+        request: { type: string }
+        plan: { type: object }
+        result: { type: object, nullable: true }
+        error: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time, nullable: true }
+        finished_at: { type: string, format: date-time, nullable: true }
     HealthResponse:
       type: object
       properties:
@@ -384,6 +445,200 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/sources:
+    post:
+      summary: Create a data source (connector)
+      description: >
+        Config is validated by the connector implementation before creation.
+        Credentials are encrypted at rest (Fernet, key derived from SECRET_KEY)
+        and never returned by the API (masked only). Types: postgres, mysql,
+        rest, website, github, gdrive, email.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SourceCreate' }
+      responses:
+        '201':
+          description: Data source created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceRead' }
+        '400':
+          description: Unknown type or invalid config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    get:
+      summary: List the organization's data sources
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Sources (org-scoped)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SourceRead' }
+  /api/v1/sources/{source_id}:
+    get:
+      summary: Get a data source (org-scoped; 404 otherwise)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Data source
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceRead' }
+        '404':
+          description: Not found (never 403 — avoids existence leak)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    patch:
+      summary: Update a data source (name/config/credentials/status)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SourceUpdate' }
+      responses:
+        '200':
+          description: Updated source
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SourceRead' }
+        '400':
+          description: Invalid merged config
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Delete a data source and its connector-created documents
+      description: >
+        Also removes connector-created documents (deterministic
+        connector/<type>/ filename prefix) from Postgres and the vector index.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Deleted }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/sources/{source_id}/test:
+    post:
+      summary: Validate config / probe connectivity
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: "{ok: true} or {ok: false, error}"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  type: { type: string }
+                  error: { type: string }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/sources/{source_id}/sync:
+    post:
+      summary: Trigger a connector sync
+      description: >
+        Queues a sync job (Celery worker in production; executed synchronously
+        when Celery is unavailable). Items are deduplicated by content hash and
+        ingested through the standard pipeline (storage → extraction →
+        chunking → embeddings → vector index), so connector content is
+        searchable and answerable like uploaded documents.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '202':
+          description: Sync job created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SyncJobRead' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: Source is disabled
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/sources/{source_id}/syncs:
+    get:
+      summary: List recent sync jobs for a source (latest first)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: source_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Sync job history (max 20)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/SyncJobRead' }
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
   /api/v1/chat/conversations:
     post:
       summary: Create a chat conversation (user-owned, org-scoped)
@@ -619,3 +874,367 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/agents/executions:
+    post:
+      summary: Run a permission-checked supervisor execution
+      description: >
+        Executes grounded retrieval by default. When source_id and sql are
+        supplied, only a bounded single SELECT/WITH query can run against an
+        organization-owned postgres or mysql source.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [request]
+              properties:
+                request: { type: string, minLength: 1, maxLength: 8000 }
+                source_id: { type: string, format: uuid, nullable: true }
+                sql: { type: string, maxLength: 10000, nullable: true }
+                max_rows: { type: integer, minimum: 1, maximum: 1000, default: 100 }
+      responses:
+        '201':
+          description: Completed execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentExecution' }
+        '400':
+          description: Validation, authorization, or tool execution failure
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    get:
+      summary: List the current user's agent executions
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+      responses:
+        '200':
+          description: Agent executions
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/AgentExecution' }
+  /api/v1/agents/executions/{execution_id}:
+    get:
+      summary: Get one current-user agent execution
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: execution_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Agent execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentExecution' }
+        '404':
+          description: Execution not found
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+  /api/v1/agents/catalog:
+    get:
+      summary: List available specialist agent capabilities
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Specialist catalog
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+  /api/v1/agents/executions/{execution_id}/steps:
+    get:
+      summary: List durable execution steps
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: execution_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Execution steps
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+  /api/v1/agents/executions/{execution_id}/cancel:
+    post:
+      summary: Cancel a non-final execution
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: execution_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Cancelled execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentExecution' }
+  /api/v1/agents/executions/{execution_id}/retry:
+    post:
+      summary: Retry an eligible failed execution
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: execution_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Retried execution
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentExecution' }
+  /api/v1/agents/executions/{execution_id}/events:
+    get:
+      summary: List durable execution events
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: execution_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Execution events
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+  /api/v1/agents/sql/schema:
+    post:
+      summary: Discover safe schema metadata for a configured source
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [source_id] }
+      responses:
+        '200':
+          description: Schema metadata
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/agents/sql/validate:
+    post:
+      summary: Validate a bounded read-only SQL statement
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [sql] }
+      responses:
+        '200':
+          description: Validation result
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/agents/sql/generate:
+    post:
+      summary: Generate safe SQL from a natural-language request
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [source_id, request] }
+      responses:
+        '200':
+          description: Generated and validated SQL
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/agents/approvals:
+    get:
+      summary: List organization-scoped approval requests
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: pending_only
+          schema: { type: boolean, default: false }
+      responses:
+        '200':
+          description: Approval requests
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+    post:
+      summary: Create an approval request
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [execution_id, action, action_summary] }
+      responses:
+        '201':
+          description: Approval request
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/agents/approvals/{approval_id}/approve:
+    post:
+      summary: Approve an action
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: approval_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Approved request
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/agents/approvals/{approval_id}/reject:
+    post:
+      summary: Reject an action
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: approval_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Rejected request
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/email/search:
+    post:
+      summary: Search messages in an authorized email connector
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [source_id], properties: { source_id: { type: string, format: uuid }, query: { type: string }, max_items: { type: integer } } }
+      responses:
+        '200':
+          description: Real provider-backed email results
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/email/draft:
+    post:
+      summary: Create an email draft requiring approval before SMTP delivery
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [source_id, recipients, subject, body] }
+      responses:
+        '201':
+          description: Approval-gated email draft
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/documents/{document_id}/extract:
+    get:
+      summary: Extract structured facts from an authorized document
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Extracted text, entities, dates, obligations, and spans
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/documents/compare:
+    post:
+      summary: Compare authorized documents
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [document_ids] }
+      responses:
+        '200':
+          description: Comparison findings and citations
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/reports/export:
+    post:
+      summary: Generate and persist a report export
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [report_id, report, format] }
+      responses:
+        '200':
+          description: Persisted report export metadata
+          content:
+            application/json:
+              schema: { type: object }
+  /api/v1/intelligence/reports:
+    get:
+      summary: List organization-scoped generated reports
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Report metadata
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+  /api/v1/intelligence/reports/{report_id}:
+    get:
+      summary: Download an organization-scoped report export
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: report_id
+          required: true
+          schema: { type: string }
+        - in: query
+          name: format
+          required: true
+          schema: { type: string, enum: [pdf, docx, xlsx, csv] }
+      responses:
+        '200':
+          description: Report file
+          content:
+            application/octet-stream: {}

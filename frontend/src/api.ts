@@ -32,6 +32,124 @@ export interface Document {
   updated_at: string
 }
 
+export type ConnectorType = 'postgres' | 'mysql' | 'rest' | 'website' | 'github' | 'gdrive' | 'email'
+
+export interface DataSource {
+  id: string
+  name: string
+  type: ConnectorType
+  status: 'active' | 'error' | 'disabled'
+  config: Record<string, unknown>
+  credentials_masked: Record<string, unknown> | null
+  last_synced_at: string | null
+  last_sync_status: string | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface SyncJob {
+  id: string
+  data_source_id: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  fetched: number
+  ingested: number
+  skipped: number
+  failed: number
+  error: string | null
+  started_at: string
+  finished_at: string | null
+}
+
+export interface SearchHit {
+  chunk_id: string
+  document_id: string
+  document_filename: string
+  chunk_index: number
+  text: string
+  provenance: Array<Record<string, unknown>>
+  score: number
+  mode: string
+  metadata: Record<string, unknown>
+}
+
+export interface SearchResponse {
+  query: string
+  mode: 'semantic' | 'lexical' | 'hybrid'
+  total: number
+  hits: SearchHit[]
+}
+
+export interface AgentExecution {
+  id: string
+  agent_type: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  request: string
+  plan: Record<string, unknown>
+  result: Record<string, unknown> | null
+  error: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface AgentExecutionStep {
+  id: string
+  agent_id: string
+  step_key: string
+  status: string
+  description: string
+  output_summary: Record<string, unknown> | null
+  error: string | null
+  started_at: string | null
+  finished_at: string | null
+}
+
+export interface AgentApproval {
+  id: string
+  execution_id: string
+  step_id: string | null
+  agent_id: string
+  action: string
+  action_summary: string
+  risk_level: string
+  requested_permissions: string[]
+  status: string
+  rejection_reason: string | null
+  requested_at: string
+  decided_at: string | null
+  expires_at: string | null
+}
+
+export interface ReportMetadata {
+  id: string
+  title: string
+  report_type: string
+  file_format: string
+  status: string
+  storage_key?: string | null
+  created_at: string
+}
+
+export interface EmailSearchResult {
+  source_id: string
+  query: string
+  count: number
+  messages: Array<{
+    external_id: string
+    subject: string
+    body: string
+    uri: string | null
+    metadata: Record<string, unknown>
+  }>
+}
+
+export interface DocumentComparison {
+  documents: Array<Record<string, unknown>>
+  comparisons: Array<Record<string, unknown>>
+  citations: Array<Record<string, unknown>>
+}
+
 function token(): string | null {
   return sessionStorage.getItem('nexus_access_token')
 }
@@ -95,6 +213,124 @@ export async function uploadDocument(file: File): Promise<Document> {
 
 export async function retryDocument(id: string): Promise<Document> {
   return apiRequest<Document>(`/documents/${id}/retry`, { method: 'POST' })
+}
+
+export async function listSources(): Promise<DataSource[]> {
+  return apiRequest<DataSource[]>('/sources')
+}
+
+export async function createSource(
+  name: string,
+  type: ConnectorType,
+  config: Record<string, unknown>,
+  credentials: Record<string, unknown>,
+): Promise<DataSource> {
+  return apiRequest<DataSource>('/sources', {
+    method: 'POST',
+    body: JSON.stringify({ name, type, config, credentials }),
+  })
+}
+
+export async function testSource(id: string): Promise<{ ok: boolean; type?: string; error?: string }> {
+  return apiRequest(`/sources/${id}/test`, { method: 'POST' })
+}
+
+export async function syncSource(id: string): Promise<SyncJob> {
+  return apiRequest<SyncJob>(`/sources/${id}/sync`, { method: 'POST' })
+}
+
+export async function listSourceSyncs(id: string): Promise<SyncJob[]> {
+  return apiRequest<SyncJob[]>(`/sources/${id}/syncs`)
+}
+
+export async function deleteSource(id: string): Promise<void> {
+  await apiRequest(`/sources/${id}`, { method: 'DELETE' })
+}
+
+export async function searchKnowledge(
+  query: string,
+  mode: SearchResponse['mode'] = 'hybrid',
+  topK = 8,
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q: query, mode, top_k: String(topK) })
+  return apiRequest<SearchResponse>(`/search?${params.toString()}`)
+}
+
+export async function listAgentExecutions(limit = 50): Promise<AgentExecution[]> {
+  return apiRequest<AgentExecution[]>(`/agents/executions?limit=${limit}`)
+}
+
+export async function createAgentExecution(
+  request: string,
+  sourceId?: string,
+  sql?: string,
+): Promise<AgentExecution> {
+  return apiRequest<AgentExecution>('/agents/executions', {
+    method: 'POST',
+    body: JSON.stringify({ request, source_id: sourceId ?? null, sql: sql || null }),
+  })
+}
+
+export async function listExecutionSteps(id: string): Promise<AgentExecutionStep[]> {
+  return apiRequest<AgentExecutionStep[]>(`/agents/executions/${id}/steps`)
+}
+
+export async function listPendingApprovals(): Promise<AgentApproval[]> {
+  return apiRequest<AgentApproval[]>('/agents/approvals?pending_only=true')
+}
+
+export async function approveAgentAction(id: string): Promise<AgentApproval> {
+  return apiRequest<AgentApproval>(`/agents/approvals/${id}/approve`, { method: 'POST' })
+}
+
+export async function rejectAgentAction(id: string, reason: string): Promise<AgentApproval> {
+  return apiRequest<AgentApproval>(`/agents/approvals/${id}/reject`, {
+    method: 'POST',
+    body: JSON.stringify({ rejection_reason: reason }),
+  })
+}
+
+export async function searchEmail(sourceId: string, query: string, maxItems = 20): Promise<EmailSearchResult> {
+  return apiRequest<EmailSearchResult>('/intelligence/email/search', {
+    method: 'POST',
+    body: JSON.stringify({ source_id: sourceId, query, max_items: maxItems }),
+  })
+}
+
+export async function createEmailDraft(
+  sourceId: string,
+  recipients: string[],
+  subject: string,
+  body: string,
+  attachments: Array<Record<string, string>> = [],
+): Promise<{ execution_id: string; approval_id: string; status: string }> {
+  return apiRequest('/intelligence/email/draft', {
+    method: 'POST',
+    body: JSON.stringify({ source_id: sourceId, recipients, subject, body, attachments }),
+  })
+}
+
+export async function listReports(): Promise<ReportMetadata[]> {
+  return apiRequest('/intelligence/reports')
+}
+
+export async function compareDocuments(documentIds: string[]): Promise<DocumentComparison> {
+  return apiRequest<DocumentComparison>('/intelligence/documents/compare', {
+    method: 'POST',
+    body: JSON.stringify({ document_ids: documentIds }),
+  })
+}
+
+export async function exportReport(reportId: string, report: Record<string, unknown>, format: 'pdf' | 'docx' | 'xlsx' | 'csv') {
+  return apiRequest<{ report_id: string; format: string; storage_key: string; size: number }>('/intelligence/reports/export', {
+    method: 'POST',
+    body: JSON.stringify({ report_id: reportId, report, format }),
+  })
+}
+
+export function reportDownloadUrl(reportId: string, format: 'pdf' | 'docx' | 'xlsx' | 'csv'): string {
+  const base = (import.meta.env.VITE_API_BASE_URL || '/api/v1').replace(/\/$/, '')
+  return `${base}/intelligence/reports/${encodeURIComponent(reportId)}?format=${format}`
 }
 
 export async function health(): Promise<{ status: string; services: Record<string, string> }> {

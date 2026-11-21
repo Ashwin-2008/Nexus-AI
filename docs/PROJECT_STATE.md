@@ -4,8 +4,8 @@ Last updated: 2026-11-15
 Updated by: Kiro (Backend)
 
 ## Overall Status
-- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) and Release 0.3 (grounded RAG + chat + streaming) implemented and verified live**. Test suite: **61 passed** (SQLite, 2026-11-15). Live Docker E2E verified: upload → extract → chunk → index → search → grounded chat answers with verified citations. Connectors, agents, SQL QA, evaluation **not implemented**.
-- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. **Chat workspace wired to backend chat/SSE API (2026-11-15):** conversation sidebar, streaming answers, citations with page provenance, answer_mode labeling, insufficient-evidence state. /search endpoint UI consumption still pending.
+- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) and Release 0.3 (grounded RAG + chat + streaming) implemented and verified live**. Connector APIs and a persisted, permission-scoped agent execution path are now implemented. The safe SQL tool is implemented but live external database execution remains credential-dependent.
+- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. Chat workspace is wired to backend chat/SSE API. **Knowledge sources CRUD/test/sync UI and authenticated knowledge search UI were integrated by Copilot (2026-11-15).**
 - Platform: compose stack runs end-to-end; nginx now re-resolves service IPs (502-on-recreate fix); MinIO images moved to bitnamilegacy (Docker Hub removal).
 
 ## Release 0.2 — VERIFIED (2026-11-15, live Docker)
@@ -63,18 +63,19 @@ Updated by: Kiro (Backend)
 | Backend ↔ Redis (connectivity) | ✅ verified (Docker) | Live Celery execution not fully verified |
 | Backend ↔ MinIO | ⚠️ partial | Code/config ready; live ops not verified |
 | Backend ↔ Qdrant | ⚠️ partial | Interfaces/health present; runtime not verified |
-| Frontend ↔ Backend | ⏳ pending | Frontend wiring/chat/sources pending; contracts updated |
+| Frontend ↔ Backend | ✅ integrated | Chat, sources, search, agent executions, durable steps, and approvals use typed authenticated APIs |
 
 ## Known Issues / Gaps
 - `auth/register` returns `UserRead` (no token); login/refresh return token pairs.
-- Chat/SSE, sources, citations, RAG answers, agents, SQL QA, evaluation: absent.
+- Live SMTP/OAuth provider verification, richer semantic document comparison, and live approval/Celery validation remain incomplete. Approval-gated SMTP delivery code, report metadata persistence/UI, and workflow routing are implemented.
 - Default EMBEDDING_PROVIDER=hashing produces NON-semantic vectors — retrieval machinery verified, but real answer quality requires EMBEDDING_PROVIDER=local (install requirements-embeddings.txt) or openai_compatible with a valid key (current .env key is a dummy `sk-...`).
 - Lexical BM25 computed in Python over org chunks (bounded 5000); Postgres tsvector/GIN migration path for large corpora.
 - PDF page-level metadata extraction: page_count verified; page-level text char offsets via spans.
 - OCR for scanned PDFs not implemented (clear ExtractionError raised instead).
 
 ## Next Actions (Backend)
-1. Release 0.3 frontend wiring ✅ DONE (2026-11-15): chat.tsx rewritten against chat API — conversation sidebar, streaming via fetch ReadableStream, citations + answer_mode display, insufficient-evidence state, error handling; type-check/lint/build clean; live-served bundle + full UI request cycle verified through nginx:8080.
-2. Release 0.4: connector framework (Postgres/MySQL/REST/website/GitHub/GDrive/email).
-3. Release 0.5: agent orchestration (supervisor/document/SQL/connector/analytics/verification agents).
-4. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.
+1. Release 0.4 backend connector framework and frontend management/search wiring are implemented; live provider verification remains credential-dependent.
+2. Agent execution foundation is implemented: persisted executions, retrieval supervisor path, bounded read-only SQL tool, audit records, API routes, and frontend execution history.
+3. Add source-level edit/reconnect configuration forms and scheduled sync controls.
+4. Configure and live-verify SMTP/OAuth delivery, deepen semantic cross-source correlation, and validate Celery against a live broker/worker.
+5. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.

@@ -12,6 +12,7 @@ import UserProfile from '../pages/auth/UserProfile'
 import Dashboard from '../pages/dashboard'
 import ChatWorkspace from '../pages/chat'
 import KnowledgeSources from '../pages/sources'
+import KnowledgeSearch from '../pages/search'
 import DocumentExplorer from '../pages/documents'
 import AgentControlCenter from '../pages/agents'
 import Analytics from '../pages/analytics'
@@ -33,6 +34,7 @@ function App() {
         <Route index element={<Dashboard />} />
         <Route path="chat" element={<ChatWorkspace />} />
         <Route path="knowledge-sources" element={<KnowledgeSources />} />
+        <Route path="search" element={<KnowledgeSearch />} />
         <Route path="document-explorer" element={<DocumentExplorer />} />
         <Route path="agent-control-center" element={<AgentControlCenter />} />
         <Route path="analytics" element={<Analytics />} />

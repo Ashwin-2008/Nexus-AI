@@ -40,10 +40,45 @@ class Settings(BaseSettings):
     ingestion_max_retries: int = 3
     ingestion_retry_backoff_seconds: int = 30
     ingestion_use_celery: bool = True
+    agent_execution_timeout_seconds: int = 900
+    agent_execution_recovery_seconds: int = 1800
+    agent_max_retries: int = 3
+    agent_approval_expiry_hours: int = 24
 
     # Chunking
     chunk_size: int = 900
     chunk_overlap: int = 150
+
+    # --- RAG subsystem -------------------------------------------------------
+    # Strategy: recursive | token | sentence | semantic | parent_child
+    rag_chunk_strategy: str = "recursive"
+    rag_parent_chunk_size: int = 1800
+    rag_child_chunk_size: int = 450
+    rag_child_overlap: int = 80
+    # Retrieval: hybrid | dense | sparse
+    rag_retrieval_mode: str = "hybrid"
+    rag_dense_top_k: int = 12
+    rag_sparse_top_k: int = 12
+    rag_hybrid_top_k: int = 16
+    rag_final_top_k: int = 8
+    rag_min_relevance: float = 0.0
+    # Reranker: heuristic | llm | cross_encoder | none | auto
+    rag_reranker: str = "heuristic"
+    rag_rerank_top_k: int = 8
+    rag_query_rewrite: bool = True
+    rag_multi_query: bool = True
+    rag_max_subqueries: int = 3
+    rag_context_compression: bool = False
+    rag_context_compression_max_sentences: int = 6
+    rag_verification: bool = True
+    # Verification thresholds are lexical-support heuristics, not probabilities.
+    rag_verification_support_threshold: float = 0.55
+    rag_verification_partial_threshold: float = 0.30
+    rag_embedding_cache_size: int = 2048
+    rag_query_log_enabled: bool = True
+    rag_max_document_bytes: int = 25 * 1024 * 1024
+    rag_rate_limit_per_minute: int = 120
+    rag_memory_max_turns: int = 4
 
     # Embeddings: provider = openai_compatible | local | hashing
     # - openai_compatible: OpenAI-compatible /v1/embeddings endpoint (needs OPENAI_API_KEY)
@@ -76,7 +111,16 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    @field_validator("debug", "minio_secure", mode="before")
+    @field_validator(
+        "debug",
+        "minio_secure",
+        "rag_query_rewrite",
+        "rag_multi_query",
+        "rag_context_compression",
+        "rag_verification",
+        "rag_query_log_enabled",
+        mode="before",
+    )
     @classmethod
     def _coerce_bool(cls, v):
         if isinstance(v, bool):

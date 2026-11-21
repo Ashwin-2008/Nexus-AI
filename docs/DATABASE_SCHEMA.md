@@ -35,4 +35,11 @@ Last updated: 2026-11-15 (Kiro, Backend)
 - Alembic: `backend/alembic.ini`, `backend/alembic/env.py`, versions `0001_initial_auth.py`–`0005_document_chunks.py`.
 
 ## Planned (not yet implemented)
-Data sources/connectors, document versions, conversations, messages, citations, agent executions, extended audit coverage, usage records, permissions tables/policies, Postgres tsvector lexical index.
+Document versions, citations, agent executions, extended audit coverage, usage records, permissions tables/policies, Postgres tsvector lexical index.
+
+### 0006_chat and 0007_connectors
+- `conversations` and `chat_messages`: organization- and user-scoped persistent chat history, citations, and execution metadata.
+- `data_sources`: organization-scoped connector configuration with encrypted credentials, lifecycle status, sync timestamps, and last error.
+- `connector_sync_jobs`: persisted connector sync status and fetched/ingested/skipped/failed counters.
+- `agent_executions`: user- and organization-scoped execution request, plan, status, result/error, and timestamps. Migration `0008_agent_executions`.
+- `reports`: organization/user-scoped generated report metadata, format, status, storage key, and optional source execution. Migration `0013_reports`.

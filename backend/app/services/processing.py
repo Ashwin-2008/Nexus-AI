@@ -1,8 +1,9 @@
 ﻿"""Document processing pipeline: extraction, normalization, chunking.
 
-Real content extraction per file type (PDF/DOCX/TXT/CSV/XLSX) with page/row
-provenance, plus configurable chunking with overlap. Embedding and vector
-indexing live in embeddings.py / vector_index.py.
+Real content extraction per file type (PDF/DOCX/TXT/Markdown/CSV/XLSX/PPTX/
+HTML/JSON/EML) with page/row/slide provenance, plus configurable chunking with
+overlap. Embedding and vector indexing live in embeddings.py /
+vector_index.py; the modular RAG pipeline builds on these primitives.
 """
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -51,8 +53,15 @@ class FileExtractor:
             ".pdf": self._extract_pdf,
             ".docx": self._extract_docx,
             ".txt": self._extract_text,
+            ".md": self._extract_markdown,
+            ".markdown": self._extract_markdown,
             ".csv": self._extract_csv,
             ".xlsx": self._extract_xlsx,
+            ".pptx": self._extract_pptx,
+            ".html": self._extract_html,
+            ".htm": self._extract_html,
+            ".json": self._extract_json,
+            ".eml": self._extract_email,
         }.get(ext)
         if extractor is None:
             raise ExtractionError(f"Unsupported file type: {ext or 'unknown'}")
@@ -227,11 +236,312 @@ class FileExtractor:
             spans=spans,
         )
 
+    # -- added formats ---------------------------------------------------------
+
+    def _extract_markdown(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        """Markdown text with ATX/Setext headings recorded as section spans."""
+        text = _decode_best_effort(data)
+        if not text.strip():
+            raise ExtractionError("Markdown file is empty")
+        lines = text.splitlines()
+        spans: list[dict[str, Any]] = []
+        sections: list[dict[str, Any]] = []
+        offset = 0
+        current_heading: str | None = None
+        heading_start = 0
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            heading = None
+            level = 1
+            if stripped.startswith("#"):
+                match = re.match(r"^(#{1,6})\s+(.*)$", stripped)
+                if match:
+                    heading = match.group(2).strip()
+                    level = len(match.group(1))
+            elif index + 1 < len(lines) and re.match(r"^\s*(=+|-{3,})\s*$", lines[index + 1]) and stripped:
+                heading = stripped
+            if heading:
+                if current_heading is not None:
+                    sections.append({"heading": current_heading, "level": level, "start": heading_start, "end": offset})
+                current_heading = heading
+                heading_start = offset
+                spans.append({"kind": "heading", "title": heading, "level": level, "start": offset, "end": offset + len(line)})
+            offset += len(line) + 1
+        if current_heading is not None:
+            sections.append({"heading": current_heading, "level": 1, "start": heading_start, "end": len(text)})
+        spans.append({"kind": "file", "start": 0, "end": len(text)})
+        return ExtractedContent(
+            text=text,
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "format": "markdown",
+                "line_count": len(lines),
+                "heading_count": len(sections),
+                "headings": [s["heading"] for s in sections[:50]],
+            },
+            spans=spans,
+        )
+
+    def _extract_html(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        """HTML text extraction (stdlib parser, no new dependency)."""
+        html = _decode_best_effort(data)
+        if not html.strip():
+            raise ExtractionError("HTML file is empty")
+        parser = _HtmlDocumentParser()
+        try:
+            parser.feed(html)
+            parser.close()
+        except Exception as e:  # noqa: BLE001
+            raise ExtractionError(f"Malformed HTML: {e}") from e
+        text = parser.text()
+        if not text.strip():
+            raise ExtractionError("HTML contains no extractable text")
+        metadata = {
+            "filename": ctx.filename,
+            "content_type": ctx.content_type,
+            "format": "html",
+            "title": parser.title,
+            "heading_count": len(parser.sections),
+            "headings": [s["heading"] for s in parser.sections[:50]],
+        }
+        if parser.title:
+            metadata["document_title"] = parser.title
+        return ExtractedContent(
+            text=text,
+            metadata=metadata,
+            spans=parser.spans or [{"kind": "file", "start": 0, "end": len(text)}],
+        )
+
+    def _extract_json(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        """Flatten JSON into readable key/value lines with per-field spans."""
+        import json as json_lib
+
+        raw = _decode_best_effort(data)
+        try:
+            payload = json_lib.loads(raw)
+        except Exception as e:  # noqa: BLE001
+            raise ExtractionError(f"Malformed JSON: {e}") from e
+        parts: list[str] = []
+        spans: list[dict[str, Any]] = []
+
+        def walk(value: Any, path: str, depth: int = 0) -> None:
+            if depth > 20:
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    walk(item, f"{path}.{key}" if path else str(key), depth + 1)
+            elif isinstance(value, list):
+                for index, item in enumerate(value):
+                    walk(item, f"{path}[{index}]", depth + 1)
+            else:
+                line = f"{path}: {value}"
+                start = sum(len(part) for part in parts)
+                parts.append(line)
+                parts.append("\n")
+                spans.append({"kind": "json_field", "path": path, "start": start, "end": start + len(line)})
+
+        walk(payload, "")
+        text = "".join(parts).strip()
+        if not text:
+            raise ExtractionError("JSON contains no scalar values")
+        return ExtractedContent(
+            text=text,
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "format": "json",
+                "field_count": len(spans),
+                "top_level_type": type(payload).__name__,
+            },
+            spans=spans,
+        )
+
+    def _extract_pptx(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        """PPTX slide text via the OOXML zip container (no python-pptx dependency)."""
+        import zipfile
+        from xml.etree import ElementTree
+
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(data))
+        except Exception as e:  # noqa: BLE001
+            raise ExtractionError(f"Malformed PPTX: {e}") from e
+        names = [name for name in archive.namelist() if re.match(r"ppt/slides/slide\d+\.xml$", name)]
+        if not names:
+            raise ExtractionError("PPTX contains no slides")
+        names.sort(key=lambda name: int(re.findall(r"(\d+)", name)[-1]))
+        ns = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        parts: list[str] = []
+        spans: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        try:
+            for slide_number, name in enumerate(names, start=1):
+                try:
+                    root = ElementTree.fromstring(archive.read(name))
+                except ElementTree.ParseError as e:
+                    warnings.append(f"slide {slide_number} parse failed: {e}")
+                    continue
+                texts = [element.text for element in root.iter(f"{ns}t") if element.text]
+                slide_text = "\n".join(part.strip() for part in texts if part.strip())
+                start = sum(len(part) for part in parts)
+                if slide_text:
+                    parts.append(slide_text)
+                    parts.append("\n\n")
+                spans.append({"kind": "slide", "number": slide_number, "start": start, "end": start + len(slide_text)})
+        finally:
+            archive.close()
+        text = "".join(parts).strip()
+        if not text:
+            raise ExtractionError("PPTX slides contain no extractable text")
+        return ExtractedContent(
+            text=text,
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "format": "pptx",
+                "slide_count": len(names),
+            },
+            spans=spans,
+            warnings=warnings,
+        )
+
+    def _extract_email(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        """Email message (.eml) with headers, body, and attachment metadata."""
+        import email as email_lib
+        from email import policy as email_policy
+
+        try:
+            message = email_lib.message_from_bytes(data, policy=email_policy.default)
+        except Exception as e:  # noqa: BLE001
+            raise ExtractionError(f"Malformed email: {e}") from e
+        bodies: list[str] = []
+        attachments: list[str] = []
+        parts = message.walk() if message.is_multipart() else [message]
+        for part in parts:
+            if part.is_multipart():
+                continue
+            filename = part.get_filename()
+            if filename:
+                attachments.append(filename)
+                continue
+            content_type = part.get_content_type()
+            if content_type not in ("text/plain", "text/html"):
+                continue
+            try:
+                body = part.get_content()
+            except Exception:  # noqa: BLE001
+                payload = part.get_payload(decode=True) or b""
+                body = payload.decode(part.get_content_charset() or "utf-8", errors="ignore")
+            if content_type == "text/html":
+                parser = _HtmlDocumentParser()
+                parser.feed(body or "")
+                body = parser.text()
+            if body and body.strip():
+                bodies.append(body.strip())
+        header_block = "\n".join(
+            f"{name}: {message.get(name)}"
+            for name in ("From", "To", "Cc", "Date", "Subject", "Message-ID")
+            if message.get(name)
+        )
+        text = (header_block + "\n\n" + "\n\n".join(bodies)).strip()
+        if not text:
+            raise ExtractionError("Email contains no readable text body")
+        return ExtractedContent(
+            text=text,
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "format": "email",
+                "subject": str(message.get("Subject") or ""),
+                "sender": str(message.get("From") or ""),
+                "date": str(message.get("Date") or ""),
+                "message_id": str(message.get("Message-ID") or ""),
+                "attachments": attachments[:50],
+            },
+            spans=[{"kind": "email", "start": 0, "end": len(text)}],
+        )
+
 
 def _extension_of(filename: str) -> str:
     import os
 
     return os.path.splitext(filename or "")[1].lower()
+
+
+class _HtmlDocumentParser(HTMLParser):
+    """Small HTML→text parser that keeps headings, paragraphs and titles.
+
+    Deliberately stdlib-only: no new runtime dependency is introduced for a
+    format the existing connector stack already needed.
+    """
+
+    SKIP_TAGS = {"script", "style", "noscript", "template", "svg", "head", "nav", "footer"}
+    BLOCK_TAGS = {"p", "div", "br", "li", "tr", "section", "article", "blockquote"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._chunks: list[str] = []
+        self._skip_depth = 0
+        self._heading_depth = 0
+        self._heading_text: list[str] = []
+        self._title_depth = 0
+        self._title_text: list[str] = []
+        self.title: str | None = None
+        self.spans: list[dict[str, Any]] = []
+        self.sections: list[dict[str, Any]] = []
+        self._offset = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:  # noqa: ANN001
+        if tag in self.SKIP_TAGS:
+            self._skip_depth += 1
+            return
+        if tag == "title":
+            self._title_depth += 1
+        if re.fullmatch(r"h[1-6]", tag):
+            self._heading_depth += 1
+            self._heading_text = []
+            self.spans.append({"kind": "heading", "level": int(tag[1]), "start": self._offset, "end": self._offset})
+        if tag in self.BLOCK_TAGS:
+            self._chunks.append("\n")
+            self._offset += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self.SKIP_TAGS:
+            if self._skip_depth:
+                self._skip_depth -= 1
+            return
+        if tag == "title" and self._title_depth:
+            self._title_depth -= 1
+            self.title = " ".join(part.strip() for part in self._title_text).strip() or None
+        if re.fullmatch(r"h[1-6]", tag) and self._heading_depth:
+            self._heading_depth -= 1
+            heading = " ".join(part.strip() for part in self._heading_text).strip()
+            if heading:
+                self.sections.append({"heading": heading, "level": int(tag[1]), "start": self._offset, "end": self._offset})
+                if self.spans:
+                    self.spans[-1]["end"] = self._offset
+                    self.spans[-1]["title"] = heading
+        if tag in self.BLOCK_TAGS:
+            self._chunks.append("\n")
+            self._offset += 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        if self._title_depth:
+            self._title_text.append(data)
+            return
+        value = data.strip()
+        if not value:
+            return
+        if self._heading_depth:
+            self._heading_text.append(value)
+        self._chunks.append(value)
+        self._chunks.append("\n")
+        self._offset += len(value) + 1
+
+    def text(self) -> str:
+        return re.sub(r"\n{3,}", "\n\n", "".join(self._chunks)).strip()
 
 
 def _decode_best_effort(data: bytes) -> str:

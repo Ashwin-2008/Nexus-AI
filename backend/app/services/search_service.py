@@ -57,7 +57,18 @@ def _tokenize(text: str) -> list[str]:
     return [t.lower() for t in _TOKEN_RE.findall(text or "")]
 
 
-def _org_chunks(db: Session, organization_id, document_ids: list[str] | None, limit: int = 5000) -> list[tuple[DocumentChunk, Document]]:
+def _org_chunks(
+    db: Session,
+    organization_id,
+    document_ids: list[str] | None,
+    limit: int = 5000,
+    *,
+    source_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    access_scopes: list[str] | None = None,
+    document_version: int | None = None,
+    include_parent_chunks: bool = False,
+) -> list[tuple[DocumentChunk, Document]]:
     query = (
         db.query(DocumentChunk, Document)
         .join(Document, Document.id == DocumentChunk.document_id)
@@ -74,7 +85,44 @@ def _org_chunks(db: Session, organization_id, document_ids: list[str] | None, li
             query = query.filter(DocumentChunk.document_id.in_(uuids))
         else:
             return []
+    if source_ids:
+        source_uuids: list[Any] = []
+        for source_id in source_ids:
+            try:
+                source_uuids.append(uuid.UUID(str(source_id)))
+            except ValueError:
+                continue
+        if source_uuids:
+            query = query.filter(Document.source_id.in_(source_uuids))
+        else:
+            return []
+    if access_scopes:
+        allowed = list(access_scopes)
+        query = query.filter(
+            or_(DocumentChunk.access_scope.is_(None), DocumentChunk.access_scope.in_(allowed))
+        )
+    if document_version is not None:
+        query = query.filter(DocumentChunk.document_version == int(document_version))
+    if not include_parent_chunks:
+        # Parent-child parents are stored for context expansion only; children are indexed.
+        query = query.filter(
+            or_(DocumentChunk.chunk_strategy.is_(None), DocumentChunk.chunk_strategy != "parent_child_parent")
+        )
     rows = query.order_by(DocumentChunk.document_id, DocumentChunk.chunk_index).limit(limit).all()
+    if source_types:
+        wanted = {value.lower() for value in source_types}
+        filtered: list[tuple[DocumentChunk, Document]] = []
+        for chunk, doc in rows:
+            metadata: dict[str, Any] = {}
+            if doc.doc_metadata:
+                try:
+                    metadata = json.loads(doc.doc_metadata) or {}
+                except Exception:  # noqa: BLE001
+                    metadata = {}
+            source_type = str(metadata.get("connector_type") or metadata.get("source") or "upload").lower()
+            if source_type in wanted:
+                filtered.append((chunk, doc))
+        rows = filtered
     return rows
 
 
@@ -84,6 +132,11 @@ def lexical_search(
     query: str,
     top_k: int,
     document_ids: list[str] | None = None,
+    *,
+    source_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    access_scopes: list[str] | None = None,
+    document_version: int | None = None,
 ) -> list[SearchHit]:
     """BM25 ranking over the organization's chunks.
 
@@ -91,7 +144,15 @@ def lexical_search(
     (bounded by limit). At current scale this is correct and dependency-free;
     a Postgres tsvector/GIN index is the migration path for large corpora.
     """
-    rows = _org_chunks(db, organization_id, document_ids)
+    rows = _org_chunks(
+        db,
+        organization_id,
+        document_ids,
+        source_ids=source_ids,
+        source_types=source_types,
+        access_scopes=access_scopes,
+        document_version=document_version,
+    )
     if not rows:
         return []
     k1, b = 1.5, 0.75
@@ -133,6 +194,10 @@ def semantic_search(
     query: str,
     top_k: int,
     document_ids: list[str] | None = None,
+    *,
+    source_ids: list[str] | None = None,
+    access_scopes: list[str] | None = None,
+    document_version: int | None = None,
 ) -> list[SearchHit]:
     provider = get_embedding_provider()
     vectors = provider.embed([query])
@@ -144,6 +209,9 @@ def semantic_search(
         organization_id=str(organization_id),
         top_k=top_k,
         document_ids=document_ids,
+        source_ids=source_ids,
+        access_scopes=access_scopes,
+        document_version=document_version,
     )
     return [
         SearchHit(
@@ -155,7 +223,15 @@ def semantic_search(
             provenance=(r.get("metadata") or {}).get("provenance", []) if isinstance(r.get("metadata"), dict) else [],
             score=r.get("score", 0.0),
             mode="semantic",
-            metadata={"semantic_score": r.get("score", 0.0)},
+            metadata={
+                "semantic_score": r.get("score", 0.0),
+                "section_heading": r.get("section_heading"),
+                "parent_chunk_id": r.get("parent_chunk_id"),
+                "content_hash": r.get("content_hash"),
+                "document_version": r.get("document_version"),
+                "access_scope": r.get("access_scope"),
+                "source_id": r.get("source_id"),
+            },
         )
         for r in results
     ]
@@ -167,12 +243,38 @@ def hybrid_search(
     query: str,
     top_k: int,
     document_ids: list[str] | None = None,
+    *,
+    source_ids: list[str] | None = None,
+    source_types: list[str] | None = None,
+    access_scopes: list[str] | None = None,
+    document_version: int | None = None,
 ) -> list[SearchHit]:
     """Reciprocal Rank Fusion of semantic and lexical rankings."""
     k = 60
-    lexical = {h.chunk_id: h for h in lexical_search(db, organization_id, query, top_k, document_ids)}
+    lexical = {
+        h.chunk_id: h
+        for h in lexical_search(
+            db,
+            organization_id,
+            query,
+            top_k,
+            document_ids,
+            source_ids=source_ids,
+            source_types=source_types,
+            access_scopes=access_scopes,
+            document_version=document_version,
+        )
+    }
     try:
-        semantic_rows = semantic_search(organization_id, query, top_k, document_ids)
+        semantic_rows = semantic_search(
+            organization_id,
+            query,
+            top_k,
+            document_ids,
+            source_ids=source_ids,
+            access_scopes=access_scopes,
+            document_version=document_version,
+        )
     except EmbeddingError as e:
         logger.warning("semantic leg unavailable (%s); hybrid degrades to lexical", e)
         semantic_rows = []
@@ -213,6 +315,12 @@ def _hit_from_row(chunk: DocumentChunk, doc: Document, score: float, mode: str) 
         metadata={
             "embedding_model": chunk.embedding_model,
             "embedding_provider": chunk.embedding_provider,
+            "section_heading": chunk.section_heading,
+            "parent_chunk_id": str(chunk.parent_chunk_id) if chunk.parent_chunk_id else None,
+            "content_hash": chunk.content_hash,
+            "document_version": chunk.document_version,
+            "access_scope": chunk.access_scope,
+            "chunk_strategy": chunk.chunk_strategy,
         },
     )
 

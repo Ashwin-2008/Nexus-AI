@@ -137,6 +137,14 @@ class QdrantVectorIndex:
                 "chunk_id": str(chunk["chunk_id"]),
                 "chunk_index": chunk.get("index", 0),
                 "text": chunk.get("text", ""),
+                "section_heading": chunk.get("section_heading"),
+                "parent_chunk_id": chunk.get("parent_chunk_id"),
+                "content_hash": chunk.get("content_hash"),
+                "token_count": chunk.get("token_count"),
+                "chunk_strategy": chunk.get("strategy"),
+                "document_version": chunk.get("document_version", 1),
+                "access_scope": chunk.get("access_scope") or "organization",
+                "source_id": str(chunk["source_id"]) if chunk.get("source_id") else None,
                 "metadata": {**(chunk.get("metadata") or {}), "provenance": chunk.get("provenance", [])},
             }
             points.append(
@@ -163,6 +171,9 @@ class QdrantVectorIndex:
         organization_id: str,
         top_k: int = 8,
         document_ids: list[str] | None = None,
+        source_ids: list[str] | None = None,
+        access_scopes: list[str] | None = None,
+        document_version: int | None = None,
     ) -> list[dict[str, Any]]:
         """Semantic search scoped to one organization (never crosses orgs)."""
         if len(vector) != self.dimensions:
@@ -179,11 +190,39 @@ class QdrantVectorIndex:
                     match=qmodels.MatchAny(any=[str(d) for d in document_ids]),
                 )
             )
+        if source_ids:
+            must_filters.append(
+                qmodels.FieldCondition(
+                    key="source_id",
+                    match=qmodels.MatchAny(any=[str(s) for s in source_ids]),
+                )
+            )
+        if document_version is not None:
+            must_filters.append(
+                qmodels.FieldCondition(
+                    key="document_version", match=qmodels.MatchValue(value=int(document_version))
+                )
+            )
+        should_filters = None
+        if access_scopes:
+            # Missing access_scope (legacy points) is treated as organization scope.
+            try:
+                empty_scope = qmodels.IsEmptyCondition(is_empty=qmodels.PayloadField(key="access_scope"))
+            except Exception:  # pragma: no cover - older client versions
+                empty_scope = None
+            conditions = [
+                qmodels.FieldCondition(
+                    key="access_scope", match=qmodels.MatchAny(any=[str(scope) for scope in access_scopes])
+                )
+            ]
+            if empty_scope is not None:
+                conditions.append(empty_scope)
+            should_filters = conditions
         try:
             hits = self.client.search(
                 collection_name=self.collection,
                 query_vector=vector,
-                query_filter=qmodels.Filter(must=must_filters),
+                query_filter=qmodels.Filter(must=must_filters, should=should_filters),
                 limit=top_k,
                 with_payload=True,
             )
@@ -197,6 +236,12 @@ class QdrantVectorIndex:
                 "chunk_index": h.payload.get("chunk_index"),
                 "text": h.payload.get("text", ""),
                 "metadata": h.payload.get("metadata") or {},
+                "section_heading": h.payload.get("section_heading"),
+                "parent_chunk_id": h.payload.get("parent_chunk_id"),
+                "content_hash": h.payload.get("content_hash"),
+                "document_version": h.payload.get("document_version"),
+                "access_scope": h.payload.get("access_scope"),
+                "source_id": h.payload.get("source_id"),
                 "score": h.score,
             }
             for h in hits
@@ -241,7 +286,7 @@ class QdrantVectorIndex:
                 "healthy": True,
                 "collection": self.collection,
                 "exists": ok,
-                "points": getattr(getattr(info, "points_count", None), "__int__", lambda: None)() if info else 0,
+                "points": int(getattr(info, "points_count", 0) or 0) if info else 0,
             }
         except Exception as e:  # noqa: BLE001
             return {"healthy": False, "error": str(e)}
@@ -297,13 +342,28 @@ class InMemoryVectorIndex:
                 "chunk_id": str(chunk["chunk_id"]),
                 "chunk_index": chunk.get("index", 0),
                 "text": chunk.get("text", ""),
+                "section_heading": chunk.get("section_heading"),
+                "parent_chunk_id": chunk.get("parent_chunk_id"),
+                "content_hash": chunk.get("content_hash"),
+                "token_count": chunk.get("token_count"),
+                "chunk_strategy": chunk.get("strategy"),
+                "document_version": chunk.get("document_version", 1),
+                "access_scope": chunk.get("access_scope") or "organization",
+                "source_id": str(chunk["source_id"]) if chunk.get("source_id") else None,
                 "metadata": chunk.get("metadata") or {},
             }
             self._points[str(chunk["chunk_id"])] = (list(vector), payload)
         return len(chunks)
 
     def search(
-        self, vector: list[float], organization_id: str, top_k: int = 8, document_ids: list[str] | None = None
+        self,
+        vector: list[float],
+        organization_id: str,
+        top_k: int = 8,
+        document_ids: list[str] | None = None,
+        source_ids: list[str] | None = None,
+        access_scopes: list[str] | None = None,
+        document_version: int | None = None,
     ) -> list[dict[str, Any]]:
         if len(vector) != self.dimensions:
             raise VectorIndexError(
@@ -322,6 +382,16 @@ class InMemoryVectorIndex:
                 continue  # hard org filter
             if document_ids and str(payload["document_id"]) not in {str(d) for d in document_ids}:
                 continue
+            if source_ids and not payload.get("source_id"):
+                continue
+            if source_ids and str(payload.get("source_id")) not in {str(s) for s in source_ids}:
+                continue
+            if access_scopes:
+                scope = payload.get("access_scope") or "organization"
+                if scope not in set(access_scopes):
+                    continue
+            if document_version is not None and int(payload.get("document_version") or 1) != int(document_version):
+                continue
             scored.append((cosine(vector, vec), payload))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [
@@ -332,6 +402,12 @@ class InMemoryVectorIndex:
                 "chunk_index": p.get("chunk_index"),
                 "text": p.get("text", ""),
                 "metadata": p.get("metadata") or {},
+                "section_heading": p.get("section_heading"),
+                "parent_chunk_id": p.get("parent_chunk_id"),
+                "content_hash": p.get("content_hash"),
+                "document_version": p.get("document_version"),
+                "access_scope": p.get("access_scope"),
+                "source_id": p.get("source_id"),
                 "score": score,
             }
             for score, p in scored[:top_k]

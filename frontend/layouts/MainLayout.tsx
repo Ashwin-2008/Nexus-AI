@@ -23,6 +23,7 @@ export default function MainLayout() {
         <NavLink to="/app">Dashboard</NavLink>
         <NavLink to="/app/document-explorer">Documents</NavLink>
         <NavLink to="/app/knowledge-sources">Sources</NavLink>
+        <NavLink to="/app/search">Search</NavLink>
         <NavLink to="/app/chat">Chat</NavLink>
         <NavLink to="/profile">Profile</NavLink>
       </nav>

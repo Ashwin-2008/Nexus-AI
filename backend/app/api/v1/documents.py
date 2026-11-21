@@ -111,7 +111,7 @@ async def _handle_upload(
     content_type = file.content_type or "application/octet-stream"
     data = await file.read()
     try:
-        validate_upload(filename, content_type, len(data))
+        validate_upload(filename, content_type, len(data), data)
     except FileValidationError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"code": "invalid_file", "message": str(e)})
 

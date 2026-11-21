@@ -28,6 +28,7 @@ from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.chat import ChatMessage, Conversation
 from app.models.user import User
+from app.rag.security import scope_from_user
 from app.services.rag_service import RagPipeline, meta_from_json, meta_to_json
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -188,7 +189,7 @@ def create_message(
     db.refresh(user_msg)
 
     if not body.stream:
-        result = pipeline.run(db, conv.organization_id, body.content)
+        result = pipeline.run(db, scope_from_user(current_user), body.content)
         assistant = ChatMessage(
             conversation_id=conv.id,
             organization_id=conv.organization_id,
@@ -204,6 +205,14 @@ def create_message(
                     "prompt_tokens": result.prompt_tokens,
                     "completion_tokens": result.completion_tokens,
                     "insufficient_evidence": result.insufficient_evidence,
+                    "verification": result.verification,
+                    "trace_id": result.trace_id,
+                    "warnings": result.warnings,
+                    "retrieval_mode": result.retrieval_mode,
+                    "reranker": result.reranker,
+                    "context_chunk_count": result.context_chunk_count,
+                    "query_analysis": result.query_analysis,
+                    "degraded_from": result.degraded_from,
                 }
             ),
         )
@@ -219,7 +228,7 @@ def create_message(
         )
         final: dict = {}
         try:
-            for event in pipeline.run_streaming(db, conv.organization_id, body.content):
+            for event in pipeline.run_streaming(db, scope_from_user(current_user), body.content):
                 final = event.get("data", final) if event["event"] == "message_end" else final
                 yield _sse(event["event"], event["data"])
         except Exception as e:  # noqa: BLE001 — stream must always terminate with an event

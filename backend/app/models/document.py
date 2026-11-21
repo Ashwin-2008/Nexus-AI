@@ -40,6 +40,13 @@ class Document(Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     storage_backend: Mapped[str] = mapped_column(String(32), nullable=False, default="local")
+    # RAG metadata: content hash for dedupe/versioning, connector linkage, access scope.
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("data_sources.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    access_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="organization")
     status: Mapped[DocumentStatus] = mapped_column(
         Enum(DocumentStatus, name="documentstatus", native_enum=False), nullable=False, default=DocumentStatus.pending
     )
@@ -112,6 +119,13 @@ class DocumentChunk(Base):
     char_start: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     char_end: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     provenance: Mapped[str | None] = mapped_column(Text, nullable=True)  # JSON: pages/rows/sheets
+    section_heading: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    parent_chunk_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    chunk_strategy: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    document_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    access_scope: Mapped[str] = mapped_column(String(32), nullable=False, default="organization")
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

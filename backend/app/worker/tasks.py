@@ -12,6 +12,33 @@ from app.worker.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 
+def enqueue_connector_sync(db, source, job) -> str | None:
+    """Enqueue a connector sync task if Celery is available; else None."""
+    if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
+        return None
+    try:
+        task = sync_connector_task.apply_async(
+            kwargs={"source_id": str(source.id), "job_id": str(job.id)},
+            queue="ingestion",
+        )
+        return task.id
+    except Exception as e:  # broker unavailable, etc.
+        logger.warning("Celery connector sync enqueue failed, using background fallback: %s", e)
+        return None
+
+
+def enqueue_agent_execution(execution_id: str) -> str | None:
+    if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
+        return None
+    try:
+        task = run_agent_execution_task.apply_async(
+            kwargs={"execution_id": execution_id},
+            queue="agents",
+        )
+        return task.id
+    except Exception as e:  # broker unavailable; caller can use synchronous fallback
+        logger.warning("Celery agent execution enqueue failed: %s", e)
+        return None
 def enqueue_document_ingestion(db, document: Document, job: IngestionJob | None = None) -> str | None:
     """Enqueue Celery task if available; return task id or None."""
     if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
@@ -82,4 +109,58 @@ if celery_app is not None:
 else:
 
     def process_document_task(*args, **kwargs):  # type: ignore[no-redef]
+        raise RuntimeError("Celery is not available")
+
+
+if celery_app is not None:
+
+    @celery_app.task(name="app.worker.tasks.sync_connector", bind=True, acks_late=True, max_retries=1)
+    def sync_connector_task(self, source_id: str, job_id: str):  # type: ignore[no-redef]
+        SessionLocal = db_session.SessionLocal
+        db = SessionLocal()
+        try:
+            from app.models.connector import ConnectorSyncJob, DataSource
+            from app.services.connectors_service import sync_data_source
+
+            source = db.get(DataSource, uuid.UUID(source_id))
+            job = db.get(ConnectorSyncJob, uuid.UUID(job_id))
+            if source is None or job is None:
+                return {"status": "missing"}
+            result = sync_data_source(db, source, job)
+            return result
+        finally:
+            db.close()
+
+else:
+
+    def sync_connector_task(*args, **kwargs):  # type: ignore[no-redef]
+        raise RuntimeError("Celery is not available")
+
+
+if celery_app is not None:
+
+    @celery_app.task(name="app.worker.tasks.run_agent_execution", bind=True, acks_late=True, max_retries=1)
+    def run_agent_execution_task(self, execution_id: str):  # type: ignore[no-redef]
+        from app.models.agent import AgentExecution
+        from app.models.user import User
+        from app.services.agent_service import run_execution
+
+        db = db_session.SessionLocal()
+        try:
+            execution = db.get(AgentExecution, uuid.UUID(execution_id))
+            if execution is None:
+                return {"status": "missing"}
+            user = db.get(User, execution.user_id)
+            if user is None or execution.status in {"succeeded", "failed", "cancelled"}:
+                return {"status": execution.status if user else "missing"}
+            result = run_execution(db, user, execution.request, execution=execution, task_id=self.request.id)
+            if result.status == "running":
+                raise self.retry(countdown=min(60, 2 ** max(1, result.retry_count)), max_retries=settings.agent_max_retries)
+            return {"status": "completed", "execution_id": execution_id}
+        finally:
+            db.close()
+
+else:
+
+    def run_agent_execution_task(*args, **kwargs):  # type: ignore[no-redef]
         raise RuntimeError("Celery is not available")

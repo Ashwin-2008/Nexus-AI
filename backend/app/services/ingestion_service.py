@@ -16,17 +16,14 @@ from app.services.processing import Chunker, ExtractionError, FileExtractor, Pro
 from app.services.storage import StorageError, StorageUnavailableError, build_document_key, get_storage_backend
 from app.services.vector_index import VectorIndexError, get_vector_index
 
-ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt", ".csv", ".xlsx"}
-ALLOWED_CONTENT_TYPES = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "text/plain",
-    "text/csv",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "application/csv",
-}
-MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024  # 25 MB
+from app.rag.constants import SUPPORTED_CONTENT_TYPES, SUPPORTED_EXTENSIONS
+from app.rag.exceptions import UnsupportedDocumentError as RagUnsupportedDocumentError
+from app.rag.exceptions import ValidationError as RagValidationError
+from app.rag.ingestion.validators import validate_document as _validate_rag_document
+
+ALLOWED_EXTENSIONS = set(SUPPORTED_EXTENSIONS)
+ALLOWED_CONTENT_TYPES = set(SUPPORTED_CONTENT_TYPES)
+MAX_FILE_SIZE_BYTES = settings.rag_max_document_bytes
 
 
 class FileValidationError(ValueError):
@@ -40,18 +37,25 @@ def get_storage_root() -> Path:
     return root
 
 
-def validate_upload(filename: str, content_type: str | None, size: int) -> str:
+def validate_upload(filename: str, content_type: str | None, size: int, data: bytes | None = None) -> str:
+    """Validate an upload (extension, size, magic bytes, archive safety).
+
+    ``size`` is kept for the existing API signature; when ``data`` is supplied
+    the RAG validator also checks magic-byte consistency and archive safety.
+    """
     ext = Path(filename).suffix.lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise FileValidationError(f"Unsupported file type: {ext or 'unknown'}")
-    if size <= 0:
-        raise FileValidationError("Empty file")
-    if size > MAX_FILE_SIZE_BYTES:
-        raise FileValidationError("File too large")
-    # content_type can be inconsistent across clients; extension is primary gate
-    if content_type and content_type not in ALLOWED_CONTENT_TYPES and content_type != "application/octet-stream":
-        pass
-    return ext
+    if data is None:
+        if ext not in ALLOWED_EXTENSIONS:
+            raise FileValidationError(f"Unsupported file type: {ext or 'unknown'}")
+        if size <= 0:
+            raise FileValidationError("Empty file")
+        if size > MAX_FILE_SIZE_BYTES:
+            raise FileValidationError("File too large")
+        return ext
+    try:
+        return _validate_rag_document(filename, content_type, data)
+    except (RagUnsupportedDocumentError, RagValidationError) as exc:
+        raise FileValidationError(str(exc)) from exc
 
 
 def secure_store(org_id: uuid.UUID, filename: str, data: bytes, content_type: str | None = None) -> tuple[str, str]:
@@ -200,6 +204,12 @@ def _error_details(exc: Exception) -> str:
 
 
 def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID | None = None, worker_name: str | None = None) -> Document:
+    """Run the full ingestion pipeline and persist durable job status.
+
+    Heavy lifting lives in ``app.rag.ingestion.pipeline.IngestionPipeline``
+    (validation -> parsing -> normalization -> metadata -> dedupe/version ->
+    chunking -> real embeddings -> Qdrant -> lexical rows -> version record).
+    """
     doc = db.get(Document, document_id)
     if not doc:
         raise ValueError("Document not found")
@@ -215,6 +225,7 @@ def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID 
     if job is None:
         job = create_ingestion_job(db, doc, attempt=(doc.retry_count or 0) + 1)
 
+    job_id = job.id
     now = datetime.now(timezone.utc)
     job.status = IngestionJobStatus.running
     job.started_at = job.started_at or now
@@ -224,71 +235,11 @@ def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID 
     db.commit()
 
     try:
-        data = load_document_bytes(doc.storage_path, getattr(doc, "storage_backend", None))
-        meta = extract_metadata_from_bytes(data, doc.storage_path, doc.filename, doc.content_type)
+        from app.rag.config import RagConfig
+        from app.rag.ingestion.pipeline import IngestionPipeline
 
-        ctx = ProcessingContext(
-            document_id=str(doc.id),
-            organization_id=str(doc.organization_id),
-            filename=doc.filename,
-            content_type=doc.content_type,
-            storage_path=doc.storage_path,
-            storage_backend=getattr(doc, "storage_backend", "local"),
-        )
-        extractor = FileExtractor()
-        extracted = extractor.extract(data, ctx)
-        for warning in extracted.warnings:
-            meta.setdefault("extraction_warnings", []).append(warning)
-        normalized = TextNormalizer().normalize(extracted)
-        chunker = Chunker(chunk_size=settings.chunk_size, overlap=settings.chunk_overlap)
-        chunks = chunker.chunk(
-            normalized, document_id=str(doc.id), organization_id=str(doc.organization_id)
-        )
-        if not chunks:
-            raise ExtractionError("Document produced no extractable text chunks")
-
-        # Embed. Failures propagate to the job failure path (no silent skip).
-        embedding_provider = get_embedding_provider()
-        vectors = embedding_provider.embed([c["text"] for c in chunks])
-        if len(vectors) != len(chunks):
-            raise EmbeddingError(
-                f"embedding count mismatch: {len(chunks)} chunks, {len(vectors)} vectors"
-            )
-
-        # Index into Qdrant (real operations; org-scoped payloads).
-        index = get_vector_index(dimensions=embedding_provider.dimensions)
-        indexed_count = index.upsert_chunks(chunks, vectors)
-
-        # Persist chunks (idempotent re-index: replace all chunks for this document).
-        db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).delete(synchronize_session=False)
-        emb_info = provider_info()
-        now = datetime.now(timezone.utc)
-        for chunk in chunks:
-            db.add(
-                DocumentChunk(
-                    id=uuid.UUID(chunk["chunk_id"]),
-                    document_id=doc.id,
-                    organization_id=doc.organization_id,
-                    chunk_index=chunk["index"],
-                    text=chunk["text"],
-                    char_start=chunk.get("char_start", 0),
-                    char_end=chunk.get("char_end", 0),
-                    provenance=json.dumps(chunk.get("provenance", []), ensure_ascii=False),
-                    embedding_provider=emb_info["provider"],
-                    embedding_model=emb_info["model"],
-                    indexed_at=now,
-                )
-            )
-        meta["processing"] = {
-            "chunks": len(chunks),
-            "embeddings": len(vectors),
-            "indexed": True,
-            "index_backend": index.name,
-            "embedding_provider": emb_info["provider"],
-            "embedding_model": emb_info["model"],
-        }
-
-        doc.doc_metadata = metadata_to_json(meta)
+        outcome = IngestionPipeline(RagConfig.from_settings()).run(db, doc)
+        doc.doc_metadata = metadata_to_json(outcome.metadata)
         doc.status = DocumentStatus.completed
         doc.error_message = None
         job.status = IngestionJobStatus.succeeded
@@ -299,19 +250,23 @@ def process_document_job(db: Session, document_id: uuid.UUID, job_id: uuid.UUID 
         db.refresh(doc)
         return doc
     except Exception as e:  # noqa: BLE001
+        db.rollback()
+        doc = db.get(Document, document_id)
+        job = db.get(IngestionJob, job_id)
+        if doc is None or job is None:
+            raise
         attempt = job.attempt or 1
         max_attempts = job.max_attempts or settings.ingestion_max_retries
         doc.retry_count = max(0, attempt - 1)
         doc.error_message = str(e)[:1000]
         job.error_message = str(e)[:1000]
         job.error_details = _error_details(e)
+        job.finished_at = datetime.now(timezone.utc)
         if attempt < max_attempts:
             job.status = IngestionJobStatus.retrying
             doc.status = DocumentStatus.pending
-            job.finished_at = datetime.now(timezone.utc)
         else:
             job.status = IngestionJobStatus.failed
             doc.status = DocumentStatus.failed
-            job.finished_at = datetime.now(timezone.utc)
         db.commit()
         raise
