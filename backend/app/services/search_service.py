@@ -330,23 +330,38 @@ def attach_document_info(db: Session, organization_id, hits: list[SearchHit]) ->
 
     Strictly org-scoped: only documents owned by organization_id are attached.
     """
-    missing_ids = {h.document_id for h in hits if not h.document_filename and h.document_id}
-    if not missing_ids:
+    if not hits:
         return hits
+    document_ids: list[uuid.UUID] = []
+    for hit in hits:
+        try:
+            document_ids.append(uuid.UUID(str(hit.document_id)))
+        except (ValueError, TypeError):
+            continue
+    if not document_ids:
+        return []
     docs = (
         db.query(Document)
         .filter(
-            Document.id.in_([mid for mid in missing_ids]),
+            Document.id.in_(document_ids),
             Document.organization_id == organization_id,
         )
         .all()
     )
     by_id = {str(d.id): d for d in docs}
-    for h in hits:
-        doc = by_id.get(h.document_id)
-        if doc is not None:
-            h.document_filename = doc.filename
-            if not h.metadata:
-                h.metadata = {}
-            h.metadata.setdefault("document_status", doc.status.value if hasattr(doc.status, "value") else str(doc.status))
-    return hits
+    attached: list[SearchHit] = []
+    for hit in hits:
+        doc = by_id.get(str(hit.document_id))
+        if doc is None:
+            # Stale or unauthorized index point: never surface content without
+            # a live, organization-owned document row.
+            continue
+        hit.document_filename = doc.filename
+        if not hit.metadata:
+            hit.metadata = {}
+        hit.metadata.setdefault(
+            "document_status",
+            doc.status.value if hasattr(doc.status, "value") else str(doc.status),
+        )
+        attached.append(hit)
+    return attached

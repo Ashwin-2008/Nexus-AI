@@ -1,15 +1,33 @@
-import React from 'react'
-import { Button, Card, Input } from '@/components/ui'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  ArrowUp,
+  Bot,
+  CheckCircle2,
+  MessageSquare,
+  Plus,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  Trash2,
+  UserRound,
+  Waypoints,
+} from 'lucide-react'
 import {
   ChatMessage,
   Citation,
   Conversation,
+  RagVerification,
   createConversation,
   deleteConversation,
   listConversations,
   listMessages,
+  ragStatus,
   sendChatMessage,
 } from '@/src/api'
+import { useAuth } from '@/src/auth'
+import { Badge, EmptyState, StatusBadge, cn, timeAgo } from '@/components/nx'
+import { Button } from '@/components/ui/button'
 
 interface DisplayMessage {
   id: string
@@ -17,168 +35,296 @@ interface DisplayMessage {
   content: string
   citations: Citation[]
   answerMode?: string
+  model?: string
   insufficientEvidence?: boolean
+  verification?: RagVerification | null
+  warnings?: string[]
   streaming?: boolean
+  latency?: number
+}
+
+const VERIFICATION_LABELS: Record<RagVerification['status'], string> = {
+  supported: 'Supported by evidence',
+  partially_supported: 'Partially supported',
+  unsupported: 'Unsupported claims',
+  conflicting_evidence: 'Conflicting evidence',
+  insufficient_evidence: 'Insufficient evidence',
+}
+
+const VERIFICATION_TONES: Record<RagVerification['status'], 'success' | 'warning' | 'danger' | 'info' | 'violet'> = {
+  supported: 'success',
+  partially_supported: 'warning',
+  unsupported: 'danger',
+  conflicting_evidence: 'danger',
+  insufficient_evidence: 'info',
+}
+
+const SUGGESTIONS = [
+  'Summarize the latest architecture decisions.',
+  'What does our onboarding process require?',
+  'List open risks across the knowledge base.',
+  'Compare the current and previous policy versions.',
+]
+
+function VerificationBadge({ verification }: { verification: RagVerification }) {
+  const coverage = Math.round((verification.evidence_coverage ?? 0) * 100)
+  return (
+    <div style={{ marginTop: 10 }}>
+      <Badge tone={VERIFICATION_TONES[verification.status]} dot>
+        {verification.status === 'supported' ? <ShieldCheck size={10} /> : <ShieldAlert size={10} />}
+        {VERIFICATION_LABELS[verification.status]} · {coverage}% coverage
+      </Badge>
+      {verification.status !== 'supported' && verification.disclaimer && (
+        <p className="nx-xs" style={{ margin: '7px 0 0', color: 'var(--nx-warning)', lineHeight: 1.5 }}>{verification.disclaimer}</p>
+      )}
+      {verification.unsupported_claims.length > 0 && (
+        <details className="nx-details" style={{ marginTop: 8 }}>
+          <summary>{verification.unsupported_claims.length} unsupported claim{verification.unsupported_claims.length === 1 ? '' : 's'}</summary>
+          <div>
+            <ul style={{ margin: 0, paddingLeft: 16, color: 'var(--nx-muted)', fontSize: 10.5, lineHeight: 1.6 }}>
+              {verification.unsupported_claims.slice(0, 5).map((claim, index) => <li key={index}>{claim}</li>)}
+            </ul>
+          </div>
+        </details>
+      )}
+      {verification.conflicting_claims.length > 0 && (
+        <details className="nx-details" style={{ marginTop: 6 }}>
+          <summary>{verification.conflicting_claims.length} conflicting claim{verification.conflicting_claims.length === 1 ? '' : 's'}</summary>
+          <div>
+            <ul style={{ margin: 0, paddingLeft: 16, color: 'var(--nx-muted)', fontSize: 10.5, lineHeight: 1.6 }}>
+              {verification.conflicting_claims.slice(0, 5).map((claim, index) => <li key={index}>{claim}</li>)}
+            </ul>
+          </div>
+        </details>
+      )}
+    </div>
+  )
 }
 
 function CitationList({ citations }: { citations: Citation[] }) {
   if (!citations.length) return null
   return (
-    <div className='mt-3 border-t border-border pt-3'>
-      <p className='text-xs font-medium text-muted-foreground mb-2'>Sources ({citations.length})</p>
-      <ul className='space-y-2'>
-        {citations.map((c) => {
-          const page = c.provenance?.find((p) => p.kind === 'page' && p.number)?.number
-          return (
-            <li key={`${c.index}-${c.chunk_id}`} className='text-xs text-muted-foreground'>
-              <span className='font-medium text-foreground'>
-                [{c.index}] {c.document_filename}
-                {page ? ` (p. ${page})` : ''}
-              </span>
-              <span className='ml-2 line-clamp-2'>{c.text.slice(0, 160)}{c.text.length > 160 ? '…' : ''}</span>
-            </li>
-          )
-        })}
-      </ul>
+    <div className="nx-citations">
+      <p className="nx-xs nx-muted" style={{ margin: '0 0 2px', fontWeight: 700 }}>Sources · {citations.length}</p>
+      {citations.map((citation) => {
+        const page = citation.page_number ?? citation.provenance?.find((item) => item.kind === 'page' && item.number)?.number
+        return (
+          <details key={`${citation.index}-${citation.chunk_id}`} className="nx-details">
+            <summary>
+              <span className="nx-badge nx-badge--info" style={{ marginRight: 7 }}>[{citation.index}]</span>
+              {citation.document_filename}
+              {page ? ` · p.${page}` : ''}
+              {citation.section_heading ? ` · ${citation.section_heading}` : ''}
+            </summary>
+            <div>
+              <p className="nx-xs nx-muted" style={{ margin: '0 0 8px', lineHeight: 1.65 }}>{citation.text}</p>
+              <div className="nx-row" style={{ gap: 6 }}>
+                {citation.source_type && <Badge tone="violet">{citation.source_type}</Badge>}
+                <Badge>score {citation.score.toFixed(3)}</Badge>
+                {citation.provenance?.slice(0, 3).map((item, index) => (
+                  <Badge key={index}>
+                    {String(item.kind)}{item.row ? ` row ${item.row}` : ''}{item.sheet ? ` ${item.sheet}` : ''}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          </details>
+        )
+      })}
     </div>
   )
 }
 
-function MessageBubble({ message }: { message: DisplayMessage }) {
-  if (message.role === 'user') {
-    return (
-      <div className='flex justify-end'>
-        <div className='max-w-[75%] rounded-lg bg-primary text-primary-foreground px-4 py-2.5 text-sm whitespace-pre-wrap'>
-          {message.content}
-        </div>
-      </div>
-    )
-  }
+function MessageBubble({ message, userInitials }: { message: DisplayMessage; userInitials: string }) {
+  const isUser = message.role === 'user'
   return (
-    <div className='flex justify-start'>
-      <div className='max-w-[85%] rounded-lg border border-border bg-card px-4 py-2.5 text-sm'>
-        <div className='whitespace-pre-wrap'>{message.content}</div>
+    <div className={cn('nx-msg', isUser ? 'nx-msg--user' : 'nx-msg--assistant')}>
+      <div className="nx-msg__avatar">{isUser ? userInitials : <Sparkles size={13} />}</div>
+      <div className="nx-msg__bubble">
+        <p>{message.content || (message.streaming ? '' : 'No answer text returned.')}</p>
         {message.streaming && (
-          <span className='inline-block h-3 w-2 animate-pulse bg-muted-foreground ml-1 align-middle' />
+          <span
+            style={{ display: 'inline-block', width: 7, height: 13, marginLeft: 3, verticalAlign: 'text-bottom', background: 'var(--nx-accent)', borderRadius: 2, animation: 'nx-pulse-glow 1s ease-in-out infinite' }}
+            aria-label="Generating"
+          />
         )}
-        {message.insufficientEvidence && (
-          <p className='mt-2 text-xs text-amber-600'>
-            No sufficiently relevant knowledge was found for this question.
-          </p>
+
+        {!isUser && !message.streaming && (
+          <>
+            {message.insufficientEvidence && (
+              <p className="nx-xs" style={{ margin: '10px 0 0', color: 'var(--nx-warning)' }}>
+                No sufficiently relevant permitted evidence was found for this question.
+              </p>
+            )}
+
+            <div className="nx-msg__meta">
+              {message.answerMode && (
+                <Badge tone={message.answerMode === 'llm' ? 'success' : message.answerMode === 'extractive' ? 'warning' : 'info'}>
+                  {message.answerMode === 'llm' ? 'Grounded generation' : message.answerMode === 'extractive' ? 'Extractive answer' : 'No evidence'}
+                </Badge>
+              )}
+              {message.model && <Badge>{message.model}</Badge>}
+              {typeof message.latency === 'number' && <Badge>{Math.round(message.latency)} ms</Badge>}
+              {message.citations.length > 0 && <Badge tone="info">{message.citations.length} citation{message.citations.length === 1 ? '' : 's'}</Badge>}
+            </div>
+
+            {message.verification && <VerificationBadge verification={message.verification} />}
+
+            {!!message.warnings?.length && (
+              <p className="nx-xs" style={{ margin: '8px 0 0', color: 'var(--nx-warning)' }}>{message.warnings.join(' · ')}</p>
+            )}
+
+            <CitationList citations={message.citations} />
+          </>
         )}
-        {message.answerMode && !message.streaming && (
-          <p className='mt-2 text-[10px] uppercase tracking-wide text-muted-foreground'>
-            {message.answerMode === 'llm' ? 'Generated answer' : message.answerMode === 'extractive' ? 'Extractive answer (no LLM configured)' : message.answerMode.replace('_', ' ')}
-            {message.insufficientEvidence ? ' · insufficient evidence' : ''}
-          </p>
-        )}
-        <CitationList citations={message.citations} />
       </div>
     </div>
   )
 }
 
 export default function ChatWorkspace() {
-  const [conversations, setConversations] = React.useState<Conversation[]>([])
-  const [activeId, setActiveId] = React.useState<string | null>(null)
-  const [messages, setMessages] = React.useState<DisplayMessage[]>([])
-  const [input, setInput] = React.useState('')
-  const [sending, setSending] = React.useState(false)
-  const [loadingList, setLoadingList] = React.useState(true)
-  const [loadingMessages, setLoadingMessages] = React.useState(false)
-  const [error, setError] = React.useState<string | null>(null)
-  const abortRef = React.useRef<AbortController | null>(null)
-  const bottomRef = React.useRef<HTMLDivElement>(null)
+  const { user } = useAuth()
+  const [conversations, setConversations] = useState<Conversation[]>([])
+  const [activeId, setActiveId] = useState<string | null>(null)
+  const [messages, setMessages] = useState<DisplayMessage[]>([])
+  const [input, setInput] = useState('')
+  const [sending, setSending] = useState(false)
+  const [loadingList, setLoadingList] = useState(true)
+  const [loadingMessages, setLoadingMessages] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [contextCount, setContextCount] = useState<number | null>(null)
+  const [retrievalMode, setRetrievalMode] = useState('hybrid')
+  const abortRef = useRef<AbortController | null>(null)
+  const bottomRef = useRef<HTMLDivElement>(null)
 
-  React.useEffect(() => {
+  const userInitials = (user?.full_name || user?.email || 'U').slice(0, 2).toUpperCase()
+  const activeConversation = useMemo(() => conversations.find((item) => item.id === activeId), [activeId, conversations])
+
+  useEffect(() => {
+    ragStatus()
+      .then((status) => setRetrievalMode(status.capabilities.default_mode || status.capabilities.modes?.[0] || 'hybrid'))
+      .catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
     listConversations()
       .then((list) => {
         setConversations(list)
         if (list.length) setActiveId((current) => current ?? list[0].id)
       })
-      .catch((e) => setError(e instanceof Error ? e.message : 'Failed to load conversations'))
+      .catch((caught) => setError(caught instanceof Error ? caught.message : 'Failed to load conversations'))
       .finally(() => setLoadingList(false))
   }, [])
 
-  React.useEffect(() => {
-    if (!activeId) { setMessages([]); return }
+  useEffect(() => {
+    if (!activeId) {
+      setMessages([])
+      return
+    }
     let cancelled = false
     setLoadingMessages(true)
+    setContextCount(null)
     listMessages(activeId)
       .then((history) => {
         if (cancelled) return
-        setMessages(history.map((m: ChatMessage) => ({
-          id: m.id,
-          role: m.role,
-          content: m.content,
-          citations: m.citations ?? [],
-          answerMode: m.meta?.answer_mode,
-          insufficientEvidence: m.meta?.insufficient_evidence,
+        setMessages(history.map((message: ChatMessage) => ({
+          id: message.id,
+          role: message.role,
+          content: message.content,
+          citations: message.citations ?? [],
+          answerMode: message.meta?.answer_mode,
+          model: message.meta?.model,
+          insufficientEvidence: message.meta?.insufficient_evidence,
+          verification: message.meta?.verification ?? null,
+          warnings: message.meta?.warnings ?? [],
+          latency: message.meta?.retrieval_latency_ms && message.meta?.generation_latency_ms
+            ? message.meta.retrieval_latency_ms + message.meta.generation_latency_ms
+            : undefined,
         })))
       })
-      .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : 'Failed to load messages') })
-      .finally(() => { if (!cancelled) setLoadingMessages(false) })
-    return () => { cancelled = true }
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : 'Failed to load messages')
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingMessages(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [activeId])
 
-  React.useEffect(() => {
+  useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages])
 
   async function handleNewConversation() {
     try {
-      const conv = await createConversation()
-      setConversations((current) => [conv, ...current])
-      setActiveId(conv.id)
+      const conversation = await createConversation()
+      setConversations((current) => [conversation, ...current])
+      setActiveId(conversation.id)
       setMessages([])
       setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create conversation')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to create conversation')
     }
   }
 
   async function handleDeleteConversation(id: string) {
+    if (!window.confirm('Delete this conversation and its messages?')) return
     try {
       await deleteConversation(id)
-      setConversations((current) => current.filter((c) => c.id !== id))
-      if (activeId === id) { setActiveId(null); setMessages([]) }
+      setConversations((current) => current.filter((conversation) => conversation.id !== id))
+      if (activeId === id) {
+        setActiveId(null)
+        setMessages([])
+      }
       setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to delete conversation')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to delete conversation')
     }
   }
 
-  async function handleSend(event: React.FormEvent) {
-    event.preventDefault()
-    const content = input.trim()
+  function stop() {
+    abortRef.current?.abort()
+    abortRef.current = null
+    setSending(false)
+    setMessages((current) => current.map((message) => message.streaming ? { ...message, streaming: false } : message))
+  }
+
+  async function handleSend(event?: React.FormEvent, preset?: string) {
+    event?.preventDefault()
+    const content = (preset ?? input).trim()
     if (!content || sending) return
     let conversationId = activeId
     try {
       if (!conversationId) {
-        const conv = await createConversation()
-        setConversations((current) => [conv, ...current])
-        setActiveId(conv.id)
-        conversationId = conv.id
+        const conversation = await createConversation()
+        setConversations((current) => [conversation, ...current])
+        setActiveId(conversation.id)
+        conversationId = conversation.id
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create conversation')
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Failed to create conversation')
       return
     }
 
-    const assistantId = `pending-${Date.now()}`
+    const timestamp = Date.now()
+    const assistantId = `pending-${timestamp}`
     setMessages((current) => [
       ...current,
-      { id: `user-${Date.now()}`, role: 'user', content, citations: [] },
+      { id: `user-${timestamp}`, role: 'user', content, citations: [] },
       { id: assistantId, role: 'assistant', content: '', citations: [], streaming: true },
     ])
     setInput('')
     setSending(true)
     setError(null)
+    setContextCount(null)
 
     const controller = new AbortController()
     abortRef.current = controller
+    const started = performance.now()
     const updateAssistant = (patch: Partial<DisplayMessage>) => {
-      setMessages((current) => current.map((m) => (m.id === assistantId ? { ...m, ...patch } : m)))
+      setMessages((current) => current.map((message) => message.id === assistantId ? { ...message, ...patch } : message))
     }
 
     try {
@@ -186,19 +332,23 @@ export default function ChatWorkspace() {
         conversationId,
         content,
         {
+          onContext: (data) => setContextCount(data.context_chunks?.length ?? 0),
           onToken: (text) => {
-            setMessages((current) => current.map((m) =>
-              m.id === assistantId ? { ...m, content: m.content + text } : m,
+            setMessages((current) => current.map((message) =>
+              message.id === assistantId ? { ...message, content: message.content + text } : message,
             ))
           },
           onEnd: (data) => {
             updateAssistant({
-              id: assistantId,
               content: data.answer,
               citations: data.citations ?? [],
               answerMode: data.answer_mode,
+              model: data.model,
               insufficientEvidence: data.insufficient_evidence,
+              verification: data.verification ?? null,
+              warnings: data.warnings ?? [],
               streaming: false,
+              latency: performance.now() - started,
             })
           },
           onError: (message) => {
@@ -208,84 +358,177 @@ export default function ChatWorkspace() {
         },
         controller.signal,
       )
-      // Safety: clear streaming flag if stream ended without message_end.
       updateAssistant({ streaming: false })
-      // Refresh conversation ordering (updated_at changes on new messages).
       listConversations().then(setConversations).catch(() => undefined)
-    } catch (e) {
+    } catch (caught) {
+      if ((caught as Error).name !== 'AbortError') setError(caught instanceof Error ? caught.message : 'Chat request failed')
       updateAssistant({ streaming: false })
-      setError(e instanceof Error ? e.message : 'Chat request failed')
     } finally {
       setSending(false)
       abortRef.current = null
     }
   }
 
-  return (
-    <div className='grid grid-cols-1 lg:grid-cols-[280px_1fr] gap-6'>
-      <Card title='Conversations'>
-        <Button variant='outline' size='sm' className='w-full mb-4' onClick={handleNewConversation}>
-          New chat
-        </Button>
-        {loadingList && <p className='text-sm text-muted-foreground'>Loading…</p>}
-        <ul className='space-y-1'>
-          {conversations.map((conv) => (
-            <li key={conv.id} className='flex items-center gap-1'>
-              <button
-                type='button'
-                onClick={() => setActiveId(conv.id)}
-                className={`flex-1 truncate rounded-md px-3 py-2 text-left text-sm hover:bg-accent ${
-                  activeId === conv.id ? 'bg-accent font-medium' : ''
-                }`}
-              >
-                {conv.title ?? 'Untitled chat'}
-              </button>
-              <Button
-                variant='ghost'
-                size='sm'
-                className='text-xs text-muted-foreground'
-                onClick={() => handleDeleteConversation(conv.id)}
-              >
-                ✕
-              </Button>
-            </li>
-          ))}
-        </ul>
-        {!loadingList && conversations.length === 0 && (
-          <p className='text-sm text-muted-foreground'>No conversations yet. Start a new chat.</p>
-        )}
-      </Card>
+  function onComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault()
+      void handleSend()
+    }
+  }
 
-      <Card title='Chat workspace'>
-        <div className='flex flex-col gap-4 min-h-[420px]'>
-          <div className='flex-1 space-y-4 overflow-y-auto max-h-[60vh]'>
-            {loadingMessages && <p className='text-sm text-muted-foreground'>Loading messages…</p>}
-            {!loadingMessages && messages.length === 0 && (
-              <p className='text-sm text-muted-foreground text-center py-12'>
-                Ask a question about your indexed documents. Answers are grounded in retrieved sources with citations.
-              </p>
+  return (
+    <div className="nx-stack" style={{ gap: 16 }}>
+      <div className="nx-row nx-row--between">
+        <div>
+          <p className="nx-eyebrow">Grounded workspace</p>
+          <h1 className="nx-title" style={{ fontSize: 28 }}>Intelligence chat</h1>
+          <p className="nx-subtitle" style={{ marginTop: 7 }}>
+            One shared retrieval pipeline, evidence revalidated before generation, citations verified after.
+          </p>
+        </div>
+        <div className="nx-row" style={{ gap: 8 }}>
+          <Badge tone="success" dot>grounded</Badge>
+          {contextCount !== null && <Badge tone="info">{contextCount} context chunk{contextCount === 1 ? '' : 's'}</Badge>}
+        </div>
+      </div>
+
+      <div className="nx-chat">
+        <aside className="nx-chat__rail">
+          <div className="nx-chat__rail-head">
+            <Button className="nx-btn--block" onClick={() => void handleNewConversation()}>
+              <Plus size={14} /> New conversation
+            </Button>
+            <p className="nx-xs nx-muted" style={{ margin: '10px 0 0' }}>
+              {conversations.length} conversation{conversations.length === 1 ? '' : 's'}
+            </p>
+          </div>
+          <div className="nx-chat__list">
+            {loadingList && <div className="nx-skeleton" style={{ height: 40 }} />}
+            {!loadingList && conversations.length === 0 && (
+              <p className="nx-xs nx-muted" style={{ padding: 10, lineHeight: 1.6 }}>No conversations yet. Start one to ask about your knowledge.</p>
             )}
+            {conversations.map((conversation) => (
+              <div key={conversation.id} style={{ position: 'relative' }}>
+                <button
+                  type="button"
+                  onClick={() => setActiveId(conversation.id)}
+                  className={cn('nx-chat__conv', activeId === conversation.id && 'is-active')}
+                  style={{ width: '100%' }}
+                >
+                  <MessageSquare size={13} />
+                  <span>{conversation.title || 'Untitled conversation'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDeleteConversation(conversation.id)}
+                  aria-label={`Delete ${conversation.title || 'conversation'}`}
+                  style={{ position: 'absolute', right: 5, top: '50%', transform: 'translateY(-50%)', border: 0, background: 'transparent', color: 'var(--nx-faint)', width: 24, height: 24, display: 'grid', placeItems: 'center', borderRadius: 7 }}
+                >
+                  <Trash2 size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+          <div style={{ padding: 12, borderTop: '1px solid var(--nx-border)' }}>
+            <div className="nx-row" style={{ gap: 7 }}>
+              <span className="nx-dot nx-dot--success" />
+              <span className="nx-xs nx-muted">RAG pipeline online</span>
+            </div>
+          </div>
+        </aside>
+
+        <section className="nx-chat__main">
+          <header className="nx-chat__header">
+            <div className="nx-row" style={{ gap: 9 }}>
+              <span className="nx-avatar" style={{ width: 32, height: 32, borderRadius: 10 }}><Bot size={15} /></span>
+              <div>
+                <p className="nx-small" style={{ margin: 0, fontWeight: 700 }}>{activeConversation?.title || 'New conversation'}</p>
+                <p className="nx-xs nx-muted" style={{ margin: '2px 0 0' }}>
+                  {activeConversation ? `Updated ${timeAgo(activeConversation.updated_at)}` : 'Ask anything across your indexed knowledge'}
+                </p>
+              </div>
+            </div>
+            <div className="nx-row" style={{ gap: 6 }}>
+              <Badge tone="violet"><Waypoints size={10} /> {retrievalMode} retrieval</Badge>
+              {sending && <StatusBadge status="running" />}
+            </div>
+          </header>
+
+          <div className="nx-chat__messages">
+            {loadingMessages && (
+              <div className="nx-stack">
+                <div className="nx-skeleton" style={{ height: 58, width: '65%' }} />
+                <div className="nx-skeleton" style={{ height: 88, width: '78%', marginLeft: 'auto' }} />
+              </div>
+            )}
+
+            {!loadingMessages && messages.length === 0 && (
+              <div style={{ margin: 'auto 0', width: '100%' }}>
+                <EmptyState
+                  icon={<Sparkles />}
+                  title="Ask your organization's knowledge"
+                  description="Every answer is grounded in permitted sources. If evidence is insufficient, Nexus says so instead of guessing."
+                />
+                <div className="nx-grid nx-grid--2" style={{ gap: 8, maxWidth: 700, margin: '4px auto 0' }}>
+                  {SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      type="button"
+                      onClick={() => void handleSend(undefined, suggestion)}
+                      className="nx-list-item"
+                      style={{ textAlign: 'left', color: 'inherit' }}
+                    >
+                      <span className="nx-list-item__icon"><Sparkles /></span>
+                      <span className="nx-list-item__body">
+                        <span className="nx-list-item__title" style={{ whiteSpace: 'normal' }}>{suggestion}</span>
+                      </span>
+                      <ArrowUp size={13} className="nx-muted" style={{ transform: 'rotate(45deg)' }} />
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {messages.map((message) => (
-              <MessageBubble key={message.id} message={message} />
+              <MessageBubble key={message.id} message={message} userInitials={userInitials} />
             ))}
             <div ref={bottomRef} />
           </div>
 
-          {error && <p className='text-sm text-red-600'>{error}</p>}
-
-          <form className='flex gap-2' onSubmit={handleSend}>
-            <Input
-              value={input}
-              onChange={(event) => setInput(event.target.value)}
-              placeholder='Ask a question about your knowledge sources…'
-              disabled={sending}
-            />
-            <Button type='submit' disabled={sending || !input.trim()}>
-              {sending ? 'Sending…' : 'Send'}
-            </Button>
-          </form>
-        </div>
-      </Card>
+          <div className="nx-composer">
+            {error && <div className="nx-error" style={{ marginBottom: 9 }}>{error}</div>}
+            <form onSubmit={handleSend}>
+              <div className="nx-composer__box">
+                <span className="nx-avatar" style={{ width: 32, height: 32, margin: '0 0 2px 2px' }}><UserRound size={14} /></span>
+                <textarea
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={onComposerKeyDown}
+                  placeholder="Ask about your documents, sources or policies…"
+                  rows={1}
+                  disabled={sending}
+                  aria-label="Message"
+                />
+                {sending ? (
+                  <Button type="button" variant="danger" size="sm" onClick={stop} style={{ height: 38 }}>
+                    <Square size={12} /> Stop
+                  </Button>
+                ) : (
+                  <Button type="submit" size="sm" disabled={!input.trim()} style={{ height: 38, width: 38, padding: 0 }} aria-label="Send message">
+                    <ArrowUp size={16} />
+                  </Button>
+                )}
+              </div>
+            </form>
+            <div className="nx-row nx-row--between" style={{ marginTop: 8 }}>
+              <span className="nx-xs nx-muted">Enter to send · Shift+Enter for a new line</span>
+              <span className="nx-xs nx-muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <CheckCircle2 size={11} /> permissions enforced before generation
+              </span>
+            </div>
+          </div>
+        </section>
+      </div>
     </div>
   )
 }

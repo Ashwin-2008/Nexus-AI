@@ -1,33 +1,116 @@
-﻿# NEXUS AI - System Architecture (Initial)
+# NEXUS AI – System Architecture
 
-Status: living architecture (2026-11-15)
+Status: living architecture, RAG subsystem integrated (2026-11-21)
 
 ## Components
-- **frontend/** (Lovable): UI, auth flows, chat, connectors, dashboards.
-- **backend/** (Kiro): FastAPI API, auth/RBAC, connectors, ingestion pipeline, RAG, multi-agent orchestration, SQL intelligence, LLM abstraction, persistence.
-- **platform/** (Amazon Q): infra, deployment, observability, data services provisioning (Postgres, Redis, Qdrant, Kafka/queue).
 
-## Core data/services (planned)
-- PostgreSQL: metadata, users/orgs/RBAC, documents, jobs, conversations, audit/usage.
-- Qdrant: vector embeddings/chunk references.
-- Redis: caching, rate limiting, session/ephemeral state.
-- Kafka/queue: async ingestion and background jobs.
-- Storage abstraction: local or MinIO objects under organization-scoped keys.
-- Connected intelligence: IMAP email retrieval, approval-gated SMTP delivery, document extraction/comparison, safe SQL/analytics, cross-source workflow routing, and persisted report exports/metadata.
+- **frontend/** — React/Vite UI with a 3D dual-theme design system: landing/auth, dashboard, chat, search, RAG console, sources, documents, agents, analytics, monitoring, administration and profile. All pages call the live API; Vite proxies `/api` to the backend in development.
+- **backend/** — FastAPI application: auth/RBAC, organization isolation, document/connector ingestion, shared RAG, LLM abstraction, specialist supervisor, safe SQL, reports, evaluation, observability.
+- **platform/** — Docker Compose, PostgreSQL, Redis/Celery, Qdrant, MinIO, nginx, Prometheus/Grafana.
+- **contracts/** — OpenAPI and integration specifications; API behavior source of truth.
 
-## Backend modules (planned, `backend/app/`)
-- `core/`: config, security, logging
-- `db/`: session, base, migrations support
-- `models/`, `schemas/`: ORM and API schemas
-- `api/v1/`: routers (auth, connectors, documents, chat, agents, analytics, admin)
-- `services/`: ingestion, retrieval/RAG, agents, connectors, LLM providers, evaluation
-- `services/intelligence.py`: organization-scoped email search, SMTP delivery, document extraction/comparison, and report export.
-- `models/report.py`: organization-scoped report metadata linked to generated storage objects and optional executions.
-- `services/specialists.py`: structured specialist handlers invoked by the durable execution service.
+## Shared RAG Architecture
 
-## Integration
-- Contracts in `contracts/openapi.yaml` and `contracts/integration-spec.md` are authoritative for cross-team APIs.
-- No frontend/platform code modified by backend; backend coordinates via contracts.
+There is exactly one RAG implementation. All callers use:
 
-## Notes
-- This is a living document; update only when architecture/structure materially changes.
+```
+app/rag/orchestration/RagOrchestrator + RagService
+```
+
+Callers: `services/rag_service.py` compatibility facade, chat API, specialist handlers, supervisor executions, RAG API. No specialist owns a separate retriever, embedding provider, vector store or generation path.
+
+### Pipeline
+
+```
+Source (upload / connector / inline text / DB record)
+  → loader + validation
+  → parser (text, layout, tables, OCR-unavailable signal)
+  → normalizer (span remapping)
+  → metadata extraction + content hash
+  → dedupe + version detection
+  → chunker (recursive | token | sentence | semantic | parent-child)
+  → embedder (validated real vectors)
+  → Qdrant upsert + PostgreSQL chunk rows + document version
+
+Question
+  → query analysis (intent/entities/dates/multi-part; deterministic fallback)
+  → optional rewrite/decomposition/expansion
+  → permission-intersected filters
+  → dense + BM25 lexical retrieval
+  → Reciprocal Rank Fusion
+  → live re-authorization of candidates
+  → reranking (heuristic | LLM | cross-encoder)
+  → parent/neighbour context expansion
+  → token-budgeted context + injection neutralization + untrusted wrappers
+  → grounded generation (LLM or labelled extractive fallback)
+  → citation resolution/validation
+  → claim-level verification
+  → response with answer, citations, evidence, verification, timings, warnings, trace id
+```
+
+### Module Map (`backend/app/rag/`)
+
+| Package | Responsibility |
+|---|---|
+| `loaders/` | Per-format, web (SSRF-protected) and database loaders |
+| `parsing/` | Layout/table extraction, cleaning, injection neutralization, OCR status |
+| `ingestion/` | Validators, metadata, dedupe, versioning, pipeline, orchestrator |
+| `chunking/` | Recursive, token, sentence, semantic, parent-child, deterministic ids |
+| `embeddings/` | Provider adapter, cache, batcher, vector validation |
+| `vectorstores/` | Qdrant adapter over the existing vector index, filters, health |
+| `indexes/` | Lexical/vector/hybrid facades, synchronization, index manager |
+| `retrieval/` | Dense, sparse, hybrid, RRF, filters/revalidation, rerank, parent/context expansion |
+| `query/` | Deterministic analyzer, optional rewrite/decomposition, routing |
+| `reranking/` | Heuristic, LLM, optional cross-encoder, provider selection |
+| `context/` | Token budget, dedupe, compression, grouping, builder |
+| `citations/` | Span resolution, validation, formatting |
+| `verification/` | Claim extraction, evidence matching, hallucination checks, statuses |
+| `generation/` | Prompt construction, structured output, generator, streaming |
+| `memory/` | Conversation context (ownership-enforced) and session trace/timings |
+| `observability/` | Tracing, logging, Prometheus metrics, performance |
+| `evaluation/` | Datasets, retrieval metrics, faithfulness, evaluator, reports |
+| `orchestration/` | Pipeline steps, `RagOrchestrator`, `RagService`, router helpers |
+
+Prompts are Markdown templates in `backend/app/prompts/` (`rag/`, `system/`, `agents/`, `workflows/`) loaded through a validated loader with hashing.
+
+## Security Model
+
+- Organization id is derived from the authenticated user, never from request filters.
+- `RagScope` contains allowed document scopes (`organization`, `member`, `admin`) by role.
+- Requested document/source filters are intersected with authorization; denied filters produce an empty result, not a broader search.
+- Every fused candidate is revalidated against live document/chunk rows before context building/generation.
+- Retrieved text is treated as untrusted: prompt-injection markers are neutralized, evidence is wrapped in `<untrusted_evidence>` and the system prompt forbids following document instructions.
+- Citation IDs are validated and fabricated indices are dropped.
+- Admin-only operations: RAG config inspection, evaluation runs/history and non-organization access scopes for ingestion.
+- Secrets are never returned by config inspection; RAG logs avoid document content and redact secret-like values.
+
+## Persistence
+
+- PostgreSQL: documents (hash/source/version/scope), chunks (heading/parent/hash/tokens/strategy/version/scope), document versions, query telemetry, evaluation runs, conversations/messages, connectors, agent executions, reports.
+- Qdrant: chunk vectors and payloads including organization/document/chunk ids, source id, version and access scope. Collection `nexus_chunks`, cosine distance.
+- Lexical: BM25 over organization chunk rows in PostgreSQL/SQLite.
+- Object storage: local or MinIO under organization-scoped keys.
+
+## Integration Boundaries
+
+- Specialists call `RagService`, not lower-level retrieval modules.
+- Chat uses the compatibility facade over the same pipeline.
+- Supervisor passes execution-scoped evidence to later steps to avoid duplicate retrieval and merges/deduplicates final citations.
+- RAG APIs extend existing routes; upload remains `/documents/upload`, search remains `/search`, chat remains `/chat`.
+- Frontend uses typed clients in `frontend/src/api.ts` and renders verification/citation/trace information.
+- The UI design system lives in `src/styles.css` (dark/light tokens, glass/glow cards, 3D orbital visuals, responsive shell) with `src/theme.tsx` for persisted theme state and `components/nx.tsx` for shared primitives.
+- Organization administration reads `/api/v1/admin/*`; analytics reads `/api/v1/analytics/overview`; profile/password changes use `PATCH /auth/me` and `POST /auth/change-password`. No page uses hardcoded “Unavailable” values.
+
+## Observability and Evaluation
+
+- Trace id per request/session; stage timings and warnings.
+- Prometheus counters/histograms for queries, retrieval modes, answer modes and citations.
+- Query telemetry persisted with organization/user/conversation scope.
+- Evaluation: retrieval metrics, optional generation metrics from real verification, persisted reports; fixtures in `app/rag/tests/fixtures/`.
+
+## Deliberate Non-Goals / Limitations
+
+- No second vector database or embedding implementation.
+- No fake embeddings, citations or evidence; unavailable OCR/providers/LLM raise or fall back explicitly.
+- Verification is deterministic lexical grounding, not a factual guarantee.
+- Live provider/Qdrant/Celery verification depends on external infrastructure and credentials.

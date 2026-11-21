@@ -1,50 +1,49 @@
 # Copilot Integration Handover
 
-Last updated: 2026-11-15
+Last updated: 2026-11-21
 
-## Completed
+## Current State
 
-- Integrated `frontend/src/api.ts` with typed source CRUD, connection test, sync, sync-history, disconnect, and knowledge-search calls.
-- Replaced the placeholder knowledge-sources page with real connector lifecycle controls and truthful loading/error/status states.
-- Added `/app/search` for authenticated lexical, semantic, and hybrid search with returned evidence and provenance.
-- Added source and search navigation to the existing application shell.
-- Added migration `0008_agent_executions`, persisted organization/user-scoped agent execution APIs, retrieval execution path, and audit records.
-- Added a bounded read-only SQL tool for configured PostgreSQL/MySQL sources. It rejects mutations, comments, multiple statements, and unbounded result sets.
-- Replaced the agent placeholder page with a real execution form and persisted execution history.
-- Added migration `0009_agent_workflow` for durable execution steps, lifecycle events, and approval requests.
-- Added capability-based specialist registry, safe schema discovery, SQL validation/generation endpoints, and organization-scoped approval APIs.
-- Added frontend execution step timeline plus pending approval approve/reject controls.
-- Added migrations `0010_agent_execution_reliability`, `0011_agent_execution_retries`, and `0012_agent_approval_expiry`.
-- Fixed background enqueue fallback duplication, added database-backed execution claiming/recovery metadata, approval expiry, cancellation, and eligible retry endpoints.
-- Added `backend/app/services/specialists.py` with structured retrieval, document, database, analytics, verification, research, report, and unavailable-email handlers; supervisor execution now invokes persisted specialist steps in plan order.
-- Added `backend/app/services/intelligence.py` and `/api/v1/intelligence` for real IMAP email search, document extraction/comparison, report export, and authenticated report downloads.
-- Added PDF export dependency `reportlab>=4.0.0` and typed frontend clients for email search, document comparison, and report exports.
-- Added workflow routing for project, contract, organization, and cross-source requests with explicit unavailable-source reporting.
-- Added approval-bound SMTP delivery in the approval decision path; sends are only marked successful after the provider accepts the message.
-- Added `0013_reports`, organization-scoped report metadata listing, and report download controls in the agent workspace.
+The modular RAG subsystem is implemented in `backend/app/rag` and is the single retrieval/generation path for chat, specialists, supervisor executions and the RAG API. Existing upload/search/chat/connectors remain the canonical surfaces and were not replaced.
+
+### Backend
+- New RAG packages: loaders, parsing, ingestion, chunking, embeddings, vectorstores, indexes, retrieval, query, reranking, context, citations, verification, generation, memory, observability, evaluation, orchestration.
+- `app/services/rag_service.py` is now a compatibility façade; old names (`RagPipeline`, `RagResult`, `verify_citations`) still work.
+- Specialists and supervisor use `RagService`; evidence is reused across steps and citations/evidence are merged and deduplicated.
+- Chat persists verification, trace id, warnings, retrieval mode/reranker and context chunk count.
+- New endpoints under `/api/v1/rag`: query, stream, retrieval test, text/file ingestion, job status, re-index, index delete, document delete, sync, sources, status, config, health, evaluation run/list/detail.
+- Connector ingestion now sets `source_id`, content hash and content type; HTML/Markdown/JSON/CSV extensions are preserved where the connector provides a MIME type.
+- Migration `0014_rag_metadata` adds document/chunk RAG metadata and document versions, query logs and evaluation runs.
+
+### Frontend
+- `frontend/src/api.ts`: typed RAG query/retrieval/status/ingest/reindex/delete-index/evaluation clients; admin/analytics clients; profile/password clients; chat meta includes verification/trace/warnings.
+- Full 3D redesign with dark/light themes in `src/styles.css`, `src/theme.tsx` and `components/nx.tsx`; every page was rebuilt.
+- `frontend/pages/rag.tsx`: query console with filters, verification/claims, citations, evidence, timings/trace, text ingestion, index re-index/delete and source status.
+- `frontend/pages/chat.tsx`: streaming tokens, verification badge, citations, warnings, stop control.
+- Dashboard/analytics/admin/monitoring now render real API data; `/app/profile` supports profile and password updates.
+- Route `/app/rag` and navigation links added; `/app/profile` is now inside the main shell.
 
 ## Validation
 
-- `Set-Location frontend; npm run type-check; npm run lint; npm run build` — passed.
-- `Set-Location backend; $env:DEBUG='false'; $env:INGESTION_USE_CELERY='false'; $env:STORAGE_BACKEND='local'; $env:RATE_LIMIT_ENABLED='false'; python -m pytest -q tests/test_connectors.py tests/test_search.py` — 33 passed.
-- `Set-Location backend; ...; python -m pytest -q tests/test_agents.py` — 3 passed.
-- `Set-Location frontend; npm run type-check; npm run lint; npm run build` — passed after agent UI integration.
-- `Set-Location backend; ...; python -m pytest -q` — 88 passed.
-- `Set-Location backend; ...; python -m pytest -q` — 91 passed after specialist handler coverage.
-- `Set-Location backend; ...; python -m pytest -q` — 92 passed after connected intelligence coverage.
-- `Set-Location backend; python -m alembic heads` — `0009_agent_workflow`.
-- `Set-Location backend; python -m alembic heads` — `0012_agent_approval_expiry`.
-- OpenAPI YAML parse and `git diff --check` — passed.
-- Final validation: backend **93 passed**, frontend type-check/lint/build passed, OpenAPI parsed, Alembic head `0013_reports`.
+- Backend: `python -m pytest -q` — **124 passed** (SQLite, memory vectors, hashing embeddings, Celery off).
+- Frontend: `npm run type-check`, `npm run lint` and `npm run build` — all passed.
+- Alembic: `python -m alembic heads` — `0014_rag_metadata` (single head).
+- OpenAPI YAML parse — passed, version 0.10.0, 66 paths.
 
-## Known limitations
+## Known Limitations
 
-- External connector operation still requires provider-specific credentials and configuration.
-- The source page currently accepts connector configuration and credentials as JSON; provider-specific OAuth/configuration forms are a follow-up.
-- Live Celery broker/worker exercise, richer semantic comparison/entity extraction, provider-backed delivery, administration, and scheduled sync controls remain unfinished. OAuth requires provider registration and credentials.
-- SMTP delivery is implemented but not live-verified; no success is reported when SMTP fails. Report metadata/UI are implemented, while richer report details and failure history remain future work.
-- `docs/QA_REPORT.md` and `docs/BUG_REGISTER.md` were not present in the repository during this increment.
+- No live PostgreSQL/Qdrant/LLM/embedding provider verification in this environment; migration 0014 is not applied to a live DB.
+- Tests use `VECTOR_INDEX_BACKEND=memory` (real cosine math, ephemeral) and `EMBEDDING_PROVIDER=hashing` (non-semantic).
+- OCR not implemented; optional sentence-transformers/pptx not installed.
+- Celery/Redis/MinIO/external connector credentials remain environment-dependent.
+- Verification is deterministic lexical grounding, not a truth guarantee.
+- Frontend `npm run lint`, `npm run type-check` and `npm run build` all passed.
+- Running local dev processes may need a backend restart to pick up new admin/analytics/profile routes (`uvicorn` without `--reload` in this environment).
 
-## Next implementation step
+## Next Implementation Step
 
-Exercise the Celery path against Redis with duplicate delivery and worker recovery, configure a real SMTP/OAuth provider, and add embedding/LLM-backed semantic cross-source comparison. Preserve the synchronous endpoint and SQL safety boundary.
+1. Apply `0014_rag_metadata` to staging PostgreSQL and run test suite.
+2. Start Qdrant and configure a real embedding provider; run ingestion/retrieval/evaluation smoke tests.
+3. Configure a real LLM key and run generation evaluation (`generate=true`) to measure faithfulness and citation correctness.
+4. Verify Celery worker recovery and connector credentials end-to-end.
+5. Add Postgres tsvector lexical backend and, if required, an OCR provider.

@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react'
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import { getCurrentUser, login as loginRequest, logout as logoutRequest, User } from './api'
 
 interface AuthContextValue {
@@ -6,6 +6,7 @@ interface AuthContextValue {
   loading: boolean
   login: (email: string, password: string) => Promise<void>
   logout: () => void
+  refreshUser: () => Promise<void>
 }
 
 const AuthContext = createContext<AuthContextValue | undefined>(undefined)
@@ -19,11 +20,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(false)
       return
     }
-    getCurrentUser().then(setUser).catch(() => logoutRequest()).finally(() => setLoading(false))
+    getCurrentUser()
+      .then(setUser)
+      .catch(() => {
+        logoutRequest()
+        setUser(null)
+      })
+      .finally(() => setLoading(false))
+  }, [])
+
+  useEffect(() => {
+    const onUnauthorized = () => {
+      logoutRequest()
+      setUser(null)
+    }
+    window.addEventListener('nexus:unauthorized', onUnauthorized)
+    return () => window.removeEventListener('nexus:unauthorized', onUnauthorized)
   }, [])
 
   async function login(email: string, password: string) {
-    setUser(await loginRequest(email, password))
+    const nextUser = await loginRequest(email, password)
+    setUser(nextUser)
   }
 
   function logout() {
@@ -31,7 +48,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setUser(null)
   }
 
-  return <AuthContext.Provider value={{ user, loading, login, logout }}>{children}</AuthContext.Provider>
+  const refreshUser = useCallback(async () => {
+    setUser(await getCurrentUser())
+  }, [])
+
+  return (
+    <AuthContext.Provider value={{ user, loading, login, logout, refreshUser }}>
+      {children}
+    </AuthContext.Provider>
+  )
 }
 
 export function useAuth(): AuthContextValue {

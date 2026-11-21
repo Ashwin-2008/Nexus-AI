@@ -5,27 +5,23 @@ export interface TableHeaderProps {
 }
 
 export function TableHeader({ children }: TableHeaderProps) {
-  return (
-    <thead>
-      {children}
-    </thead>
-  )
+  return <thead>{children}</thead>
 }
 
-export function Table({ children, className }: { children: React.ReactNode; className?: string }) {
-  return <table className={className}>{children}</table>
+export function Table({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return <table className={`nx-table ${className}`}>{children}</table>
 }
 
-export function TableHead({ children }: { children: React.ReactNode }) {
-  return <th className="p-3 text-left">{children}</th>
+export function TableHead({ children, className = '' }: { children: React.ReactNode; className?: string }) {
+  return <th className={className}>{children}</th>
 }
 
-export interface TableRowProps {
+export interface TableRowProps extends React.HTMLAttributes<HTMLTableRowElement> {
   children: React.ReactNode
   className?: string
 }
 
-export function TableRow({ children, className, ...props }: TableRowProps) {
+export function TableRow({ children, className = '', ...props }: TableRowProps) {
   return (
     <tr className={className} {...props}>
       {children}
@@ -33,12 +29,12 @@ export function TableRow({ children, className, ...props }: TableRowProps) {
   )
 }
 
-export interface TableCellProps {
+export interface TableCellProps extends React.TdHTMLAttributes<HTMLTableCellElement> {
   children: React.ReactNode
   className?: string
 }
 
-export function TableCell({ children, className, ...props }: TableCellProps) {
+export function TableCell({ children, className = '', ...props }: TableCellProps) {
   return (
     <td className={className} {...props}>
       {children}
@@ -51,7 +47,5 @@ export interface TableBodyProps {
 }
 
 export function TableBody({ children }: TableBodyProps) {
-  return (
-    <tbody>{children}</tbody>
-  )
+  return <tbody>{children}</tbody>
 }

@@ -95,6 +95,7 @@ class RagService:
         from app.rag.context.builder import ContextBuilder
         from app.rag.memory.session_context import SessionContext
         from app.rag.query.analyzer import QueryAnalyzer
+        from app.rag.retrieval.filters import revalidate_evidence
         from app.rag.types import RagTimings
 
         session = SessionContext(
@@ -104,6 +105,7 @@ class RagService:
         )
         timings = RagTimings()
         analysis = QueryAnalyzer(self.config).analyze(query, conversation=conversation)
+        evidence, _removed = revalidate_evidence(db, scope, RetrievalFilters(), evidence)
         bundle = ContextBuilder(self.config).build(
             scope, evidence[: top_k or self.config.final_top_k], query=query, analysis=analysis
         )

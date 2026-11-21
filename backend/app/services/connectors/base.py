@@ -412,6 +412,22 @@ def _fetch_sql_rows(ctx: ConnectorContext, driver: str) -> list[tuple[str, str, 
     if url.startswith("mysql://"):
         url = url.replace("mysql://", "mysql+pymysql://", 1)
 
+    # Allow the password to live in encrypted credentials instead of the
+    # connector config. Config is visible to organization members; credentials
+    # are encrypted at rest and never returned by the API.
+    cred_username = ctx.credentials.get("username")
+    cred_password = ctx.credentials.get("password")
+    if cred_password:
+        try:
+            parsed = sa.engine.make_url(url)
+            parsed = parsed.set(
+                username=str(cred_username) if cred_username else parsed.username,
+                password=str(cred_password),
+            )
+            url = parsed.render_as_string(hide_password=False)
+        except Exception as exc:  # noqa: BLE001
+            raise ConnectorError(f"{driver} connection_url is invalid: {exc}") from exc
+
     try:
         engine = sa.create_engine(url, connect_args={"connect_timeout": 10} if driver == "postgres" else {})
         with engine.connect() as conn:

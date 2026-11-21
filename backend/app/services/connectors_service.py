@@ -47,8 +47,28 @@ def _slug(value: str) -> str:
     return (slug or "item")[:180]
 
 
-def build_connector_filename(source_type: str, external_id: str) -> str:
-    return f"connector/{source_type}/{_slug(external_id)}.txt"
+_MIME_EXTENSIONS = {
+    "text/html": ".html",
+    "application/xhtml+xml": ".html",
+    "application/json": ".json",
+    "text/markdown": ".md",
+    "text/csv": ".csv",
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/plain": ".txt",
+}
+
+
+def _item_extension(item: ConnectorItem) -> str:
+    extension = _MIME_EXTENSIONS.get((item.mime or "").split(";")[0].strip().lower())
+    if extension:
+        return extension
+    suffix = Path(item.uri or "").suffix.lower()
+    return suffix if suffix in {".md", ".html", ".htm", ".json", ".csv", ".txt"} else ".txt"
+
+
+def build_connector_filename(source_type: str, external_id: str, extension: str = ".txt") -> str:
+    return f"connector/{source_type}/{_slug(external_id)}{extension}"
 
 
 def sync_data_source(db: Session, source: DataSource, job: ConnectorSyncJob) -> dict[str, Any]:
@@ -90,8 +110,10 @@ def sync_data_source(db: Session, source: DataSource, job: ConnectorSyncJob) -> 
         try:
             content = item.data if item.data is not None else (item.text or "").encode("utf-8")
             content_hash = item.content_hash()
-            filename = build_connector_filename(source.type, item.external_id)
+            extension = _item_extension(item)
+            filename = build_connector_filename(source.type, item.external_id, extension)
             title = item.title or Path(filename).stem
+            content_type = item.mime or "text/plain"
 
             existing = (
                 db.query(Document)
@@ -108,13 +130,13 @@ def sync_data_source(db: Session, source: DataSource, job: ConnectorSyncJob) -> 
                     continue
 
             storage_path, storage_backend = secure_store(
-                source.organization_id, filename, content, content_type="text/plain"
+                source.organization_id, filename, content, content_type=content_type
             )
             metadata: dict[str, Any] = {
                 "filename": filename,
-                "content_type": "text/plain",
+                "content_type": content_type,
                 "size_bytes": len(content),
-                "extension": ".txt",
+                "extension": extension,
                 "source": "connector",
                 "connector_type": source.type,
                 "external_id": item.external_id,
@@ -126,18 +148,28 @@ def sync_data_source(db: Session, source: DataSource, job: ConnectorSyncJob) -> 
                 # Re-ingest in place (same document row, fresh ingestion job)
                 existing.status = DocumentStatus.pending
                 existing.error_message = None
+                existing.content_type = content_type
+                existing.file_size = len(content)
+                existing.storage_path = storage_path
+                existing.storage_backend = storage_backend
+                existing.content_hash = content_hash
+                existing.source_id = source.id
+                existing.access_scope = "organization"
                 doc = existing
             else:
                 doc = Document(
                     organization_id=source.organization_id,
                     uploaded_by=source.created_by,
                     filename=filename,
-                    content_type="text/plain",
+                    content_type=content_type,
                     file_size=len(content),
                     storage_path=storage_path,
                     storage_backend=storage_backend,
                     status=DocumentStatus.pending,
                     retry_count=0,
+                    content_hash=content_hash,
+                    source_id=source.id,
+                    access_scope="organization",
                 )
                 db.add(doc)
             doc.doc_metadata = json.dumps(metadata, ensure_ascii=False)

@@ -189,7 +189,9 @@ def create_message(
     db.refresh(user_msg)
 
     if not body.stream:
-        result = pipeline.run(db, scope_from_user(current_user), body.content)
+        result = pipeline.run(
+            db, scope_from_user(current_user), body.content, conversation_id=str(conv.id)
+        )
         assistant = ChatMessage(
             conversation_id=conv.id,
             organization_id=conv.organization_id,
@@ -228,7 +230,9 @@ def create_message(
         )
         final: dict = {}
         try:
-            for event in pipeline.run_streaming(db, scope_from_user(current_user), body.content):
+            for event in pipeline.run_streaming(
+                db, scope_from_user(current_user), body.content, conversation_id=str(conv.id)
+            ):
                 final = event.get("data", final) if event["event"] == "message_end" else final
                 yield _sse(event["event"], event["data"])
         except Exception as e:  # noqa: BLE001 — stream must always terminate with an event

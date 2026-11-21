@@ -260,7 +260,7 @@ class RagOrchestrator:
             timings.retrieval_ms = _ms(retrieval_started)
             if not result.evidence:
                 response = self._no_evidence_response(analysis, result, request, timings, session, db)
-                yield {"event": "rag_end", "data": response.to_dict(include_evidence_text=False)}
+                yield {"event": "rag_end", "data": self._stream_payload(response)}
                 return
             bundle = self.context_builder.build(
                 scope,
@@ -271,7 +271,7 @@ class RagOrchestrator:
             )
             if not bundle.passages:
                 response = self._no_evidence_response(analysis, result, request, timings, session, db)
-                yield {"event": "rag_end", "data": response.to_dict(include_evidence_text=False)}
+                yield {"event": "rag_end", "data": self._stream_payload(response)}
                 return
             yield {
                 "event": "context",
@@ -329,7 +329,7 @@ class RagOrchestrator:
             self._persist_query_log(db, scope, request, response, analysis)
             record_query(result.mode, outcome.answer_mode)
             record_citations(len(citations))
-            yield {"event": "rag_end", "data": response.to_dict(include_evidence_text=False)}
+            yield {"event": "rag_end", "data": self._stream_payload(response)}
         except Exception as exc:  # noqa: BLE001 — stream must terminate with an event
             log_event("rag_stream_error", trace_id=session.trace_id, error=str(exc)[:300])
             yield {
@@ -342,6 +342,13 @@ class RagOrchestrator:
             }
 
     # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _stream_payload(response: RagResponse) -> dict[str, Any]:
+        """Final SSE payload: citation text is needed by clients, evidence is not."""
+        payload = response.to_dict(include_evidence_text=False)
+        payload["citations"] = [citation.to_dict(include_text=True) for citation in response.citations]
+        return payload
 
     def _no_evidence_response(
         self,

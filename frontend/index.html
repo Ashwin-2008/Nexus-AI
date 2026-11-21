@@ -3,7 +3,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>NEXUS AI - Enterprise Knowledge Intelligence</title>
+    <meta name="theme-color" content="#05070f" />
+    <meta name="description" content="Nexus AI — organization-scoped enterprise knowledge intelligence with grounded retrieval, citations, and specialist agents." />
+    <meta name="color-scheme" content="dark light" />
+    <script>
+      try {
+        var storedTheme = localStorage.getItem('nexus_theme');
+        document.documentElement.dataset.theme =
+          storedTheme === 'light' || storedTheme === 'dark'
+            ? storedTheme
+            : window.matchMedia('(prefers-color-scheme: light)').matches
+              ? 'light'
+              : 'dark';
+      } catch (error) {
+        document.documentElement.dataset.theme = 'dark';
+      }
+    </script>
+    <title>NEXUS AI — Enterprise Knowledge Intelligence</title>
   </head>
   <body>
     <div id="root"></div>

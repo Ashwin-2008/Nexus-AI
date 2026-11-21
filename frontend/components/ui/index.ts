@@ -1,5 +1,5 @@
 export { Button } from './button'
 export { Card } from './card'
-export { Input } from './input'
+export { Input, Select, Textarea } from './input'
 export { NavLink } from './navlink'
 export { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './table'

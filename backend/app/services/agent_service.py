@@ -11,6 +11,7 @@ from app.agents.registry import route_request
 from app.core.config import settings
 from app.models.agent import AgentExecution, AgentExecutionEvent, AgentExecutionStep
 from app.models.connector import DataSource
+from app.models.report import Report
 from app.models.user import AuditLog, User
 from app.rag.security import scope_from_user
 from app.services.connectors import ConnectorContext, ConnectorError, parse_config
@@ -21,6 +22,51 @@ from app.services.specialists import execute_specialist
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _record_generated_report(
+    db: Session,
+    user: User,
+    execution: AgentExecution,
+    result: dict[str, Any],
+) -> None:
+    """Persist metadata for a specialist-generated report artifact.
+
+    The report body remains in object storage; this row makes the artifact
+    discoverable and downloadable through the reports API without duplicating
+    its content in the database.
+    """
+    storage_key = result.get("storage_key")
+    report_format = str(result.get("format") or "").lower()
+    if not isinstance(storage_key, str) or not storage_key:
+        return
+    if report_format not in {"markdown", "md"}:
+        return
+    existing = (
+        db.query(Report)
+        .filter(Report.execution_id == execution.id, Report.organization_id == user.organization_id)
+        .first()
+    )
+    title = (execution.request or "NEXUS AI Report").strip()[:255] or "NEXUS AI Report"
+    if existing is None:
+        db.add(
+            Report(
+                organization_id=user.organization_id,
+                user_id=user.id,
+                execution_id=execution.id,
+                title=title,
+                report_type=execution.agent_type or "generated",
+                file_format="md",
+                status="completed",
+                storage_key=storage_key,
+            )
+        )
+    else:
+        existing.title = title
+        existing.file_format = "md"
+        existing.status = "completed"
+        existing.storage_key = storage_key
+        existing.error = None
 
 
 def _plan(request: str, source_id: str | None, sql: str | None, source_ids: list[str] | None = None) -> dict[str, Any]:
@@ -108,6 +154,11 @@ def _merge_execution_result(
             merged["answer"] = item["answer"]
         if item.get("insufficient_evidence") is True:
             merged["insufficient_evidence"] = True
+        # Preserve the durable report artifact produced by the report specialist
+        # even when later verification/analytics steps replace the step result.
+        for artifact_key in ("format", "storage_key", "preview"):
+            if item.get(artifact_key) and not merged.get(artifact_key):
+                merged[artifact_key] = item[artifact_key]
     if citations:
         ordered = sorted(
             citations.values(),
@@ -278,6 +329,7 @@ def run_execution(
             step.claimed_at = None
             _event(db, execution, "step.completed", step, {"status": step.status})
         result = _merge_execution_result(result, step_results)
+        _record_generated_report(db, user, execution, result)
         execution.result = json.dumps(result, ensure_ascii=False, default=str)
         execution.status = "succeeded"
         execution.finished_at = _now()

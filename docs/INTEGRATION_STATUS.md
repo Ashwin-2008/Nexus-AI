@@ -1,78 +1,86 @@
 # Nexus AI – Integration Status
 
-Last updated: 2026-11-15
-Updated by: Kiro (Backend) — full stack re-verification with live Docker E2E
+Last updated: 2026-11-21 (RAG subsystem integration)
 
 ## Ownership
-- Frontend: **Cline (VS Code)** — `frontend/` (Lovable abandoned)
-- Backend: **Kiro** — `backend/`
-- Platform: **Amazon Q** — `platform/`, compose, nginx, monitoring
-- QA: **Copilot** — `tests/`, independent verification
+- Frontend: Cline (VS Code) — `frontend/`
+- Backend: Kiro — `backend/`
+- Platform: Amazon Q — `platform/`, compose, nginx, monitoring
+- QA: Copilot — tests, independent verification
 
 ## Verification Key
-- ✅ Verified — confirmed by direct execution this session
-- ⏳ Not yet attempted
-- ⚠️ Exists but incomplete/non-conformant
+- ✅ Verified by direct execution in this environment
+- ⚠️ Implemented but not live-verified (missing infrastructure/credentials)
+- ⏳ Not attempted
 
-## Live Stack Status (Docker Compose, 2026-11-15)
+## Current RAG Integration Status
 
 | Check | Result | Evidence |
 |---|---|---|
-| Full compose stack starts | ✅ | 11 services up (postgres/qdrant/redis/minio/backend/worker/frontend/nginx/prometheus/grafana + minio-init) |
-| Alembic migrations 0001–0005 | ✅ | `alembic upgrade head` against live Postgres; all tables present incl. document_chunks |
-| Backend health via Nginx (8080) | ✅ | GET /api/v1/health → all services healthy |
-| Register/Login/Me/Refresh/Logout | ✅ | Live HTTP 201/200 verified; token rotation + logout verified in tests |
-| Upload → MinIO → Redis → Celery → completed | ✅ | TXT + 5-page PDF: doc completed, job succeeded by `celery@…`, MinIO object at org-isolated key |
-| Extraction (real) | ✅ | PDF page_count=5; TXT/CSV/XLSX/DOCX extractors unit-tested |
-| Chunk persistence | ✅ | document_chunks rows with char ranges + provenance + embedding info |
-| Qdrant indexing | ✅ | points_count=5, collection dim=256 cosine, org/document payload indexes |
-| Semantic / lexical / hybrid search | ✅ | GET /api/v1/search all modes return real scores + provenance |
-| Org isolation on search | ✅ | Other org user: total=0 on all modes, incl. explicit document_ids filter |
-| Retry → re-index idempotency | ✅ | Deterministic chunk ids; re-index leaves exactly 5 points, no orphans |
-| Cross-org document access | ✅ | 404 (not leaked), list empty, retry denied |
-| Frontend build (type-check/lint/build) | ✅ | Clean (2026-11-15) |
-| Frontend chat wiring (F6) | ✅ | chat.tsx consumes conversations CRUD + POST SSE streaming (fetch ReadableStream) via src/api.ts; served bundle verified live |
-| Frontend ↔ Backend /search wiring | ✅ | `/app/search` uses typed authenticated `/search` client with selectable retrieval mode |
-| Chat/RAG streaming | ✅ backend verified live | SSE streaming + grounded citations; frontend chat page wired (2026-11-15) |
-| Connector backend ↔ frontend | ✅ | `/app/knowledge-sources` uses create/list/test/sync/history/disconnect APIs; provider credentials still required for live external systems |
-| Agent execution foundation | ✅ | Persisted `/agents/executions`, retrieval execution path, bounded read-only SQL tool, audit records, durable steps/events, specialist catalog, and frontend execution/approval history |
-| Durable agent workflow / specialist registry / approvals / SQL NL generation | ✅ | Migrations 0009–0012, database-backed claiming/recovery metadata, approval expiry, cancellation/retry APIs, capability catalog, safe SQL boundary, and frontend controls; live broker validation and full specialist handlers remain follow-up |
-| Connected intelligence APIs | ✅ | Real IMAP search, approval-gated SMTP path, permission-scoped document extraction/comparison, report metadata migration/listing, and PDF/DOCX/XLSX/CSV exports; provider credentials and live external systems remain environment-dependent |
+| Shared RAG used by chat, specialists, supervisor and RAG API | ✅ | `RagService`/`RagOrchestrator` calls in `services/rag_service.py`, `services/specialists.py`, `api/v1/chat.py`, `api/v1/rag.py` |
+| One vector store/embedding abstraction | ✅ | `rag/vectorstores` adapts existing `services/vector_index.py`; embeddings adapt existing `services/embeddings.py` |
+| Ingestion formats (PDF/DOCX/TXT/MD/CSV/XLSX/PPTX/HTML/JSON/EML/web/DB) | ✅ code paths / unit fixtures | `tests/test_processing.py`, RAG unit tests, loader/parser code; EML/HTML/JSON/PPTX extraction exercised |
+| Recursive/token/sentence/semantic/parent-child chunking | ✅ | `tests/test_rag_units.py`, deterministic ids/parent links |
+| Real embedding validation and no fake vectors | ✅ | Provider adapter + zero/NaN/dimension validation tests; live provider not configured |
+| Hybrid retrieval + RRF | ✅ | `tests/test_search.py`, `tests/test_rag_pipeline.py`, fusion unit tests |
+| Reranking abstraction | ✅ | Heuristic default; LLM/cross-encoder paths explicit |
+| Query understanding deterministic fallback | ✅ | `tests/test_rag_units.py` |
+| Token-budgeted context, injection neutralization, untrusted wrappers | ✅ | `tests/test_rag_units.py` |
+| Grounded generation / insufficient evidence | ✅ | Integration tests produce extractive answers; no live LLM |
+| Citations and verification statuses | ✅ | Citation validation, numeric conflict, verification tests; integration asserts supported/partial status + disclaimer |
+| Organization isolation and filters | ✅ | RAG integration tests: filtered document IDs and cross-org empty/insufficient result |
+| Permission revalidation before generation | ✅ | `revalidate_evidence` in retriever and `answer_with_evidence` |
+| RAG API endpoints | ✅ | `/api/v1/rag/*` routes registered and integration-tested |
+| Ingestion job polling/re-index/delete index/sync | ✅ | `tests/test_rag_pipeline.py` |
+| Evaluation metrics and persistence | ✅ | Recall/Precision/MRR/NDCG + `/rag/evaluation/run` integration test |
+| Frontend RAG console + chat verification badges | ✅ verified | `pages/rag.tsx`, `pages/chat.tsx`, `src/api.ts`; type-check, lint and production build passed |
+| Migration `0014_rag_metadata` | ⚠️ authored, head singular | `alembic heads` → `0014_rag_metadata`; live PostgreSQL not available |
+| Frontend 3D redesign + dual theme | ✅ verified | `src/styles.css`, `src/theme.tsx`, `components/nx.tsx`, all pages; type-check/lint/build passed |
+| Admin/analytics/profile backend wiring | ✅ | `api/v1/admin.py`, `api/v1/analytics.py`, `auth.py` profile/password routes; `tests/test_admin_analytics_profile.py` |
+| Frontend live data (no Unavailable placeholders) | ✅ | Dashboard/analytics/admin/monitoring/profile call real endpoints; local API responses verified by tests |
+| Reports, document preview/comparison, email and database intelligence UI | ✅ | `/app/reports`, `/app/email`, `/app/database`, document extraction/compare; report downloads resolve metadata server-side |
+| Agent cancel/retry, step output and chart-spec rendering | ✅ | `/app/agents` calls `/cancel`, `/retry`, renders persisted chart specs |
+| Provider/agent configuration visibility | ✅ | `/system/capabilities` + `/agents/catalog`; admin/monitoring cards |
+| Connector templates match backend contracts | ✅ | `pages/sources.tsx`; SQL passwords moved to encrypted credentials |
+| Live Qdrant | ⚠️ not live-verified | Tests use `VECTOR_INDEX_BACKEND=memory` (real cosine math, ephemeral) |
+| Live LLM generation | ⚠️ not live-verified | No valid API key; extractive fallback tested |
+| Real semantic embeddings | ⚠️ not live-verified | Hashing provider used in tests; OpenAI/local adapters implemented |
+| Celery/Redis/worker recovery | ⚠️ not live-verified | Celery disabled in tests |
+| MinIO | ⚠️ not live-verified | Local storage used in tests |
+| External connector credentials/OAuth/SMTP | ⚠️ credential-dependent | Connector framework and error paths tested; no live provider |
 
-## Infrastructure Fixes Applied (2026-11-15)
-| Issue | Fix | File |
-|---|---|---|
-| minio/minio + minio/mc removed from Docker Hub (pull denied) | Switched to `bitnamilegacy/minio:2024` + `bitnamilegacy/minio-client:2024` (mc bundled); credentials via MC_HOST env, not argv | docker-compose.yml |
-| Qdrant healthcheck used wget (absent in image) | bash /dev/tcp port probe | docker-compose.yml |
-| Backend healthcheck used wget (absent) | curl (installed in image) | docker-compose.yml |
-| Worker crash-loop: exec-form CMD doesn't expand env | Shell-form CMD in Dockerfile.worker | backend/Dockerfile.worker |
-| Frontend image build failed: win32-only rollup dep in lockfile | Removed `@rollup/rollup-win32-x64-msvc` from devDependencies | frontend/package.json |
-| Nginx 502 after backend container recreation (cached IP) | Docker DNS resolver + variable proxy_pass (re-resolve every 10s) | platform/nginx/nginx.conf |
-| qdrant-client 1.20 vs server 1.9.2 mismatch | Pinned `qdrant-client>=1.9.0,<1.10` | backend/requirements.txt |
-| Port 80 reserved on Windows host | HTTP_PORT=8080 in .env | .env |
+## Backend Validation
 
-## Environment Notes
-- `.env` is populated with real values (not committed). OPENAI_API_KEY is a **dummy** (`sk-...`) — embedding provider defaults to `hashing` (non-semantic, machinery only). For real semantics set `EMBEDDING_PROVIDER=local` (install backend/requirements-embeddings.txt) or `openai_compatible` with a valid key.
+```
+cd backend
+python -m pytest -q
+# 124 passed, 1 qdrant-client compatibility warning
+```
 
-## API Contract
-- `contracts/openapi.yaml` v0.5.0 — auth, documents, **/api/v1/search (new)**, health, metrics.
-- Endpoint implementations match contract; frontend /search consumption pending.
+Environment uses SQLite in-memory, `INGESTION_USE_CELERY=false`, `STORAGE_BACKEND=local`, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`.
 
-## Test Baseline
-- Backend: **52 passed** (SQLite; vector backend=memory, embedding=hashing, celery off). Command: `cd backend; DEBUG=false INGESTION_USE_CELERY=false STORAGE_BACKEND=local RATE_LIMIT_ENABLED=false; python -m pytest -q`.
-- New suites: test_processing.py (extraction/chunking/provenance), test_embeddings.py (providers), test_search.py (3 modes + org isolation).
+## Frontend Validation
 
-## Change Log
+```
+cd frontend
+npm run type-check   # passed
+npm run lint         # passed
+npm run build        # passed
+```
 
-| Date | Change | Author |
-|------|--------|--------|
-| 2025-01-01..03 | Initial reconciliation, IC-001..024 | Amazon Q |
-| 2026-11-14 | IC-005..024 resolved by Cline/Kiro (frontend builds clean, backend suite 20 passed) | Cline/Kiro |
-| 2026-11-15 | Release 0.2 implemented + live-verified (extraction/chunking/embeddings/Qdrant/search); infra fixes above; contract v0.5.0; suite 52 passed | Kiro |
-| 2026-11-15 | Release 0.3 implemented + live-verified (RAG/chat/SSE); contract v0.6.0; suite 61 passed | Kiro |
-| 2026-11-15 | Frontend chat wiring (F6): pages/chat.tsx rewritten against chat API (conversations, streaming, citations, answer_mode, insufficient-evidence, errors); api.ts SSE client; type-check/lint/build clean; live-served bundle + full UI request cycle verified through nginx:8080 | Kiro (frontend fill-in; Cline owns `frontend/`) |
-| 2026-11-15 | Frontend source/search integration: typed `/sources` and `/search` clients, operational source management UI, sync history, connector status/error states, and knowledge search page; frontend type-check/lint/build clean; focused backend connector/search tests 33 passed | Copilot |
-| 2026-11-15 | Agent execution foundation: migration 0008, persisted supervisor/retrieval executions, read-only SQL validation/execution tool, org-scoped APIs, audit events, frontend agent history; focused agent tests 3 passed and frontend validation clean | Copilot |
-| 2026-11-15 | Durable agent workflows: migrations 0009–0012, step/event persistence, database-backed claiming/recovery metadata, specialist registry, SQL schema/validation/generation APIs, approval expiry, cancellation/retry lifecycle endpoints, frontend step timeline and approval controls; full backend suite 89 passed and frontend validation clean | Copilot |
-| 2026-11-15 | Connected intelligence: real IMAP email search API, document extraction/comparison API with organization checks, persisted PDF/DOCX/XLSX/CSV report exports/download API, typed frontend clients, QA report and bug register; full backend suite 92 passed | Copilot |
-| 2026-11-15 | Cross-source workflow routing, approval-bound SMTP send path, report metadata migration/listing/download UI, OpenAPI updates, and regression validation; full backend suite 93 passed | Copilot |
+The redesigned frontend uses a Tailwind v4 + custom CSS design system, persisted dark/light themes, and live API calls for every page. Vite proxies `/api` to the local backend by default.
+
+## Migration Status
+
+- New revision: `0014_rag_metadata` (down_revision `0013_reports`).
+- Historical revisions unchanged.
+- Not applied to live PostgreSQL here. Apply with `alembic upgrade head` before deploying RAG endpoints against Postgres.
+
+## Known Integration Gaps
+
+- No live Qdrant collection verification; memory backend is process-local and loses data on restart.
+- No live embedding/LLM provider; answers in test runs are labelled extractive fallbacks.
+- Optional `sentence-transformers` cross-encoder and PPTX library are not installed; paths report unavailability.
+- OCR for scanned PDFs is not implemented (explicit error).
+- Postgres tsvector lexical backend not implemented (BM25 over bounded chunk rows currently).
+- Large-corpus performance and evaluation quality require live data.

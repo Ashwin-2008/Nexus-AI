@@ -1,6 +1,6 @@
 ﻿# Database Schema
 
-Last updated: 2026-11-15 (Kiro, Backend)
+Last updated: 2026-11-21 (RAG metadata migration 0014 added)
 
 ## Implemented (Alembic migrations)
 
@@ -29,13 +29,11 @@ Last updated: 2026-11-15 (Kiro, Backend)
 - Point payload: organization_id, document_id, chunk_id, chunk_index, text, metadata{provenance, ...}; keyword payload indexes on organization_id and document_id. All retrieval filtered by organization_id — cross-org leakage structurally prevented.
 
 ## Notes
+- The admin/analytics/profile UI surfaces are read/write over existing tables (`users`, `audit_logs`, RAG telemetry, documents, connectors, agents); no additional schema migration was required for the 0.9.0 frontend release.
 - Passwords stored only as bcrypt hashes (`hashed_password`). No plaintext secrets in DB.
 - Refresh tokens stored as SHA-256 hashes (`token_hash`); rotation and revocation supported.
-- Organization isolation enforced at query/service layer (`organization_id` scoping) for documents and ingestion jobs.
-- Alembic: `backend/alembic.ini`, `backend/alembic/env.py`, versions `0001_initial_auth.py`–`0005_document_chunks.py`.
-
-## Planned (not yet implemented)
-Document versions, citations, agent executions, extended audit coverage, usage records, permissions tables/policies, Postgres tsvector lexical index.
+- Organization isolation is enforced at the query/service layer (`organization_id` scoping) for documents, chunks, connectors, chat, agents, reports and RAG telemetry.
+- Alembic: `backend/alembic.ini`, `backend/alembic/env.py`, revisions `0001_initial_auth.py` through `0014_rag_metadata.py` (single head).
 
 ### 0006_chat and 0007_connectors
 - `conversations` and `chat_messages`: organization- and user-scoped persistent chat history, citations, and execution metadata.
@@ -43,3 +41,20 @@ Document versions, citations, agent executions, extended audit coverage, usage r
 - `connector_sync_jobs`: persisted connector sync status and fetched/ingested/skipped/failed counters.
 - `agent_executions`: user- and organization-scoped execution request, plan, status, result/error, and timestamps. Migration `0008_agent_executions`.
 - `reports`: organization/user-scoped generated report metadata, format, status, storage key, and optional source execution. Migration `0013_reports`.
+- Durable agent steps/events, approvals, reliability/claim metadata, retry and approval-expiry migrations `0009`–`0012`.
+
+### 0014_rag_metadata (authored; not applied to live PostgreSQL in this environment)
+- **documents (alter)**: `content_hash` VARCHAR(64) NULL (indexed), `source_id` UUID NULL FK data_sources(id) SET NULL (indexed), `version` INTEGER NOT NULL DEFAULT 1, `access_scope` VARCHAR(32) NOT NULL DEFAULT 'organization'.
+- **document_chunks (alter)**: `section_heading` VARCHAR(512), `parent_chunk_id` UUID, `content_hash` VARCHAR(64) (indexed), `token_count` INTEGER, `chunk_strategy` VARCHAR(32), `document_version` INTEGER NOT NULL DEFAULT 1, `access_scope` VARCHAR(32) NOT NULL DEFAULT 'organization'.
+- **document_versions**: id, document_id FK CASCADE, organization_id FK CASCADE, version, content_hash, chunk_count, chunk_strategy, embedding_provider/model/dimensions, status, detail JSON text, created_at; unique `(document_id, version)`; indexes on document/organization/status.
+- **rag_query_logs**: id, organization_id, user_id, conversation_id, trace_id, query, mode, filters JSON, retrieved/reranked/citation counts, answer_mode, verification_status, retrieval/generation/total latency, detail, created_at; indexes on organization/user/conversation/trace.
+- **rag_evaluation_runs**: id, organization_id, user_id, name, dataset_name, status, item_count, metrics JSON, detail JSON, error, created_at, finished_at; indexes on organization/user/status.
+
+### Vector and lexical indexes
+- Qdrant point payload now includes `organization_id`, `document_id`, `chunk_id`, `chunk_index`, `text`, `section_heading`, `parent_chunk_id`, `content_hash`, `token_count`, `chunk_strategy`, `document_version`, `access_scope`, `source_id`, metadata. Retrieval applies organization/access/document/source/version filters.
+- Lexical BM25 reads organization `document_chunks`; parent-child parent rows are excluded from ranking and used only for context expansion.
+
+## Not Yet Implemented
+- Postgres tsvector/GIN lexical index for large corpora.
+- Permission-policy tables beyond role/access-scope enforcement; usage/billing records.
+- OCR storage for scanned documents (OCR path raises an explicit unavailable error).

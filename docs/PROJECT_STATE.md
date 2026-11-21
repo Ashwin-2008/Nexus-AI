@@ -1,81 +1,77 @@
-﻿# Nexus AI – Project State
+# Nexus AI – Project State
 
-Last updated: 2026-11-15
-Updated by: Kiro (Backend)
+Last updated: 2026-11-21
+Updated by: RAG implementation pass
 
 ## Overall Status
-- Backend: Milestones 1–3 verified; **Release 0.2 (chunking + embeddings + Qdrant indexing + search) and Release 0.3 (grounded RAG + chat + streaming) implemented and verified live**. Connector APIs and a persisted, permission-scoped agent execution path are now implemented. The safe SQL tool is implemented but live external database execution remains credential-dependent.
-- Frontend: official implementation is `frontend/` (Cline, in-repo). Builds/lints/type-checks clean. Chat workspace is wired to backend chat/SSE API. **Knowledge sources CRUD/test/sync UI and authenticated knowledge search UI were integrated by Copilot (2026-11-15).**
-- Platform: compose stack runs end-to-end; nginx now re-resolves service IPs (502-on-recreate fix); MinIO images moved to bitnamilegacy (Docker Hub removal).
 
-## Release 0.2 — VERIFIED (2026-11-15, live Docker)
-- Real extraction: `app/services/processing.py` FileExtractor — PDF (pypdf, page spans), DOCX (paragraphs+tables), CSV (rows/header), XLSX (sheets/rows), TXT (encoding fallback). Malformed files raise ExtractionError → job failed (no silent completion).
-- Chunking: configurable size/overlap, sentence/paragraph-aware breaks, per-chunk provenance (page/row/sheet), deterministic chunk IDs (uuid5 of document_id+index) → idempotent re-indexing (verified: re-index leaves exactly 5 points, no orphans).
-- Embeddings: `app/services/embeddings.py` — providers: openai_compatible (HTTP, retries/backoff), local (sentence-transformers, requirements-embeddings.txt), hashing (deterministic, NON-SEMANTIC, dev/test only). Selection via EMBEDDING_PROVIDER. Dimension validation + provider/model tracking persisted per chunk.
-- Qdrant: `app/services/vector_index.py` — collection lifecycle, upsert (wait=True), org+document filtered search, delete, count, health; payload indexes on organization_id/document_id. Client pinned to 1.9.x to match server v1.9.2.
-- Search API: `GET /api/v1/search?q&mode&top_k&document_ids` — lexical (BM25 in-Python over org chunks), semantic (Qdrant), hybrid (RRF). Strictly org-scoped. Contract v0.5.0.
-- Chunk persistence: migration 0005 `document_chunks` (applied to live Postgres), model `DocumentChunk`.
+The modular RAG subsystem is implemented and wired through the existing backend. Upload, connectors, chat, specialists, supervisor executions and the main chat API all use the same retrieval/generation path in `backend/app/rag`. No second agent framework, vector database, embedding provider, or retrieval implementation was added.
 
-## Live verification evidence (Docker, 2026-11-15)
-- 5-page PDF upload → doc completed; metadata page_count=5; 5 chunks persisted (char ranges overlap correctly); Qdrant points_count=5, status green, collection dim=256 cosine.
-- Search live: lexical scores (BM25), semantic scores (Qdrant cosine), hybrid RRF scores; page provenance on hits.
-- Org isolation live: second org's user gets total=0 on all modes, even with document_ids filter naming org A's document.
-- Retry → re-queue → re-process verified live; deterministic chunk IDs prevent orphaned vectors.
+Validation in this environment (no live Docker/Postgres/Qdrant, no valid LLM/embedding API key):
+- Backend suite: **124 passed** (SQLite, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`, Celery disabled).
+- Frontend: `npm run type-check`, `npm run lint` and `npm run build` passed after the 3D dual-theme redesign.
+- Alembic: single head `0014_rag_metadata`; migration **not applied to a live PostgreSQL instance** in this environment.
+- Live Qdrant, live LLM generation, real semantic embeddings, MinIO, Redis/Celery, and external connectors were **not live-verified**.
 
-## Release 0.3 — VERIFIED (2026-11-15, live Docker)
-- LLM abstraction `app/services/llm.py`: OpenAI-compatible chat completions (streaming + non-streaming, retries, usage tracking); grounded **extractive fallback** (verbatim retrieved sentences, clearly labeled `answer_mode=extractive`) when no LLM configured or LLM fails — never fabricates.
-- RAG pipeline `app/services/rag_service.py`: hybrid retrieval → context assembly (token budget, RAG_MAX_CONTEXT_CHUNKS) → generation (LLM w/ anti-prompt-injection system prompt) → **citation verification** (fabricated [n] references dropped; every citation maps to a retrieved chunk) → explicit insufficient-evidence handling.
-- Chat API `app/api/v1/chat.py`: conversations CRUD (owner+org scoped, 404 not 403 to avoid existence leak), messages history, POST message with **SSE streaming** (message_start → context → token* → message_end) and non-streaming mode; both user and assistant messages persisted with citations/meta.
-- Migration 0006: conversations, chat_messages (applied to live Postgres).
-- Tests: 61 passed. Live E2E verified: grounded answer with page-provenance citations; streaming event sequence correct; assistant persistence after stream; cross-org questions return explicit no_evidence with zero leakage; LLM-failure degradation labeled (`degraded_from: llm`).
+## Implemented RAG Capabilities
 
-## Component Status
+### Ingestion
+- Sources: uploads, inline RAG text/file API, connectors (website, GitHub, REST, Postgres/MySQL records, Google Drive, IMAP email) and database records through the existing connector framework.
+- Formats: PDF, DOCX, TXT, MD, CSV, XLSX, PPTX, HTML, JSON, EML; OCR is explicitly unavailable rather than silently faked.
+- Stages: load → validate (extension allow-list, size, magic bytes, archive bomb checks) → parse/layout/table extraction → normalize with span remapping → metadata extraction → duplicate detection/content hash → versioning → chunk → embed → vector upsert → chunk rows → version record.
+- Chunking: recursive, token, sentence, semantic (documented lexical-cohesion heuristic), parent-child. Deterministic UUIDv5 chunk ids, provenance, content hashes and token counts.
+- Embeddings: real provider adapters (OpenAI-compatible, local sentence-transformers if installed, deterministic hashing for tests/offline only) with zero/NaN/dimension validation. Hashing vectors are labelled as non-semantic.
+- Versioning/dedupe: SHA-256 content hashes, `document_versions`, duplicate-of warnings, stale vector/row replacement on re-index.
 
-| Component | Engineer | Status | Notes |
-|---|---|---|---|
-| Platform | Amazon Q | existing | Not modified/re-verified end-to-end |
-| Backend | Kiro | in progress (partial) | Auth+refresh/logout/policy/audit scaffold, RBAC/org isolation helpers, documents+ingestion jobs, storage abstraction, processing interfaces, health/metrics |
-| Frontend | Cline (VS Code) | in-repo scaffold (partial) | API wiring mostly pending; contracts updated for backend reality |
+### Retrieval
+- Query understanding: intent, entities, date constraints, multi-part detection, specialist hints; deterministic fallback; optional validated LLM rewrite/decomposition.
+- Dense + BM25 lexical retrieval, Reciprocal Rank Fusion, explicit degradation when a leg is unavailable.
+- Filters: organization, document-level access scope, document IDs, source IDs/types, document version.
+- Re-authorization of every fused candidate against live document/chunk rows before generation.
+- Reranking: heuristic default, optional LLM and optional cross-encoder with explicit unavailability.
+- Parent-child expansion and optional neighbouring context.
+- Token-budgeted context builder with deduplication, verbatim extractive compression, prompt-injection neutralization, untrusted-evidence delimiters and citation indexing.
 
-## Backend – Verified increments (actual)
+### Generation, Citations, Verification
+- Grounded generation reusing the existing LLM abstraction; deterministic labelled extractive fallback; explicit `no_evidence` response when evidence is insufficient.
+- Central citation resolver with organization/document validation and fabricated-index rejection.
+- Claim-level verification with transparent statuses: `supported`, `partially_supported`, `unsupported`, `conflicting_evidence`, `insufficient_evidence`, plus numeric/polarity conflict signals and a non-certainty disclaimer.
 
-### Baseline tests (SQLite, local)
-- Command: `cd backend; $env:DEBUG='false'; $env:INGESTION_USE_CELERY='false'; $env:STORAGE_BACKEND='local'; $env:RATE_LIMIT_ENABLED='false'; python -m pytest -q`
-- Result: **20 passed** (2026-11-14). Includes DB/health, auth register/login/me/JWT/unauthorized/duplicate, org isolation, validation/error envelopes, document upload/validation/metadata/retry/jobs, refresh/rotation/logout, password policy.
+### Shared Integration
+- `app/services/rag_service.py` is now a compatibility façade over `app/rag`; chat and specialists use it.
+- Chat (non-streaming and SSE) persists citations, verification, trace id, warnings, retrieval mode and timings.
+- Specialist handlers (retrieval, document, research, database documentation lookup, verification, report, workflow, email where authorized) call the shared RAG service. Evidence from an earlier supervisor step is reused instead of retrieving twice.
+- Supervisor merges/deduplicates citations and evidence and exposes verification status.
+- New `/api/v1/rag/*` endpoints extend the API without replacing existing `/documents`, `/search` or `/chat` routes.
+- Frontend RAG console (`/app/rag`) provides querying, filters, verification display, text ingestion, index re-index/deletion and status; admins also get evaluation runs, resolved configuration and index-health cards. Chat displays verification badges and the configured retrieval mode.
 
-### Docker integration (actual)
-- **PostgreSQL (postgres:15-alpine):** ✅ `alembic upgrade head` applied `0001_initial_auth`–`0004_auth_security` (tables include users/orgs/roles/documents/ingestion_jobs/refresh_tokens/audit_logs).
-- **Redis (redis:7-alpine):** ✅ connectivity `PONG` verified previously.
-- **MinIO:** ⚠️ not end-to-end verified (image unavailable in env); MinIO backend/config/fallback implemented.
-- **Qdrant:** ⚠️ not end-to-end verified.
-- **Celery worker (live/compose):** ⚠️ task registration importable; live worker/restart-survival/retry execution not fully integration-tested.
+### Frontend Experience (3D redesign)
+- Design system in `frontend/src/styles.css`: dark/light themes with persisted preference, animated aurora/grid atmosphere, glass cards, glow accents, 3D orbital visuals, responsive shell and reduced-motion support.
+- Every page redesigned: landing/auth (login, register, recovery guidance), dashboard, chat, search, RAG console, sources, documents, agents, analytics, monitoring, administration, profile.
+- Live wiring replaces prior “Unavailable” placeholders: dashboard/analytics use `/analytics/overview`, administration uses `/admin/overview|users|audit-logs` plus `/system/capabilities` and `/agents/catalog`, profile uses `PATCH /auth/me` and `POST /auth/change-password`, monitoring uses real health/index/connector/provider state.
+- Added `/app/reports` (persisted artifacts, authenticated download, delete), `/app/email` (IMAP search, approval-gated SMTP drafts), `/app/database` (schema discovery, SQL generation/validation/execution, result tables/charts), document extraction preview/comparison, agent cancel/retry and chart-spec rendering.
+- `frontend/src/theme.tsx` provides the theme provider; `frontend/components/nx.tsx` supplies shared badges, stats, modals, page headers and formatting helpers.
+- Vite dev server proxies `/api` to `http://127.0.0.1:8000` so the default `/api/v1` base works without an environment variable; `VITE_API_BASE_URL` still overrides it.
 
-## Milestone status (high level)
-- **M1 Auth & security:** partial. Implemented: register/login/me, access+refresh tokens with rotation/revocation, logout, password policy, hashed refresh storage, audit log scaffolding, org isolation on resources, RBAC deps/roles seeded. Gaps: account activation/deactivation API, full permission model/admin endpoints, enforced rate limiting verification, comprehensive cross-org/privilege-escalation test coverage beyond current suite, logout invalidation semantics for access tokens (stateless JWT).
-- **M2 Ingestion reliability:** partial. Persisted jobs/attempts/failure details, Celery+Redis path with DB fallback, backoff retries. Gaps: idempotency guarantees, duplicate upload handling/checksum, dead-letter handling, queue monitoring, restart/recovery integration proof.
-- **M3 Storage & document processing:** partial. Storage abstraction (local/MinIO), org-isolated keys, extractors/metadata for PDF/DOCX/TXT/CSV/XLSX, limits/basic validation. Gaps: checksums/duplicate detection, secure access controls, MinIO production verification, malformed-file hardening, cleanup.
-- **M4–M15 (chunking, embeddings, Qdrant indexing, retrieval, RAG, chat/SSE, connectors, agents, SQL QA, eval, hardening, full verification):** **not implemented/verified** (interfaces/placeholders only where noted). **Do not mark RAG or agentic functionality complete.**
+### Observability and Evaluation
+- Trace ids, structured RAG events, Prometheus counters/histograms, secret redaction, and bounded query telemetry (`rag_query_logs`).
+- Evaluation framework: Recall@K, Precision@K, MRR, NDCG@K; optional generation metrics derived from real verification; persisted runs (`rag_evaluation_runs`) and lintable JSONL fixtures.
 
-## Integration Status
-| Integration | Status | Notes |
-|---|---|---|
-| Backend ↔ Postgres (migrations 0001-0004) | ✅ verified (Docker) | Alembic upgrade succeeded |
-| Backend ↔ Redis (connectivity) | ✅ verified (Docker) | Live Celery execution not fully verified |
-| Backend ↔ MinIO | ⚠️ partial | Code/config ready; live ops not verified |
-| Backend ↔ Qdrant | ⚠️ partial | Interfaces/health present; runtime not verified |
-| Frontend ↔ Backend | ✅ integrated | Chat, sources, search, agent executions, durable steps, and approvals use typed authenticated APIs |
+## Migrations
+- `0014_rag_metadata` adds document hash/source/version/access scope, chunk headings/parent/hash/tokens/strategy/version/scope, and `document_versions`, `rag_query_logs`, `rag_evaluation_runs`.
+- Historical migrations were not modified.
 
-## Known Issues / Gaps
-- `auth/register` returns `UserRead` (no token); login/refresh return token pairs.
-- Live SMTP/OAuth provider verification, richer semantic document comparison, and live approval/Celery validation remain incomplete. Approval-gated SMTP delivery code, report metadata persistence/UI, and workflow routing are implemented.
-- Default EMBEDDING_PROVIDER=hashing produces NON-semantic vectors — retrieval machinery verified, but real answer quality requires EMBEDDING_PROVIDER=local (install requirements-embeddings.txt) or openai_compatible with a valid key (current .env key is a dummy `sk-...`).
-- Lexical BM25 computed in Python over org chunks (bounded 5000); Postgres tsvector/GIN migration path for large corpora.
-- PDF page-level metadata extraction: page_count verified; page-level text char offsets via spans.
-- OCR for scanned PDFs not implemented (clear ExtractionError raised instead).
+## Known Limitations / Honest Blockers
+- No live PostgreSQL/Qdrant in this environment; vector behaviour was verified with the process-local cosine backend and real embedding-provider adapters were exercised only for the deterministic hashing provider.
+- No valid live LLM/embedding key; generated answers in tests are extractive fallbacks, not live LLM output.
+- OCR for scanned PDFs is not implemented; an explicit OCR-unavailable error is raised.
+- Semantic chunking and verification are deterministic lexical heuristics, not trained models; verification is a review signal, not certainty.
+- Celery/Redis worker paths, MinIO, live connector credentials, OAuth/SMTP, and large-corpus Postgres tsvector indexing remain environment-dependent follow-ups.
+- Python is 3.14 in this environment; optional `sentence-transformers`/`pptx` libraries are not installed, so the corresponding paths report unavailability instead of pretending to work.
 
-## Next Actions (Backend)
-1. Release 0.4 backend connector framework and frontend management/search wiring are implemented; live provider verification remains credential-dependent.
-2. Agent execution foundation is implemented: persisted executions, retrieval supervisor path, bounded read-only SQL tool, audit records, API routes, and frontend execution history.
-3. Add source-level edit/reconnect configuration forms and scheduled sync controls.
-4. Configure and live-verify SMTP/OAuth delivery, deepen semantic cross-source correlation, and validate Celery against a live broker/worker.
-5. Consider Postgres tsvector lexical backend when corpus > 5k chunks/org.
+## Next Actions
+1. Apply `0014_rag_metadata` to a live PostgreSQL and run ingestion/retrieval against live Qdrant.
+2. Configure a real embedding provider and LLM key; run generation evaluation with `generate=true`.
+3. Verify Celery worker recovery/duplicate delivery and connector credentials end-to-end.
+4. Add a Postgres tsvector/GIN lexical backend for large organizations.
+5. Expand evaluation datasets with organization-specific gold evidence.

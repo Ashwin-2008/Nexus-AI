@@ -5,9 +5,20 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.core.config import settings
+from app.core.security import get_password_hash, validate_password_policy, verify_password
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.auth import LogoutRequest, Message, RefreshRequest, Token, UserCreate, UserLogin, UserRead
+from app.schemas.auth import (
+    LogoutRequest,
+    Message,
+    PasswordChange,
+    RefreshRequest,
+    Token,
+    UserCreate,
+    UserLogin,
+    UserProfileUpdate,
+    UserRead,
+)
 from app.services import auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -91,3 +102,68 @@ def logout(
 @router.get("/me", response_model=UserRead)
 def read_me(current_user: User = Depends(get_current_user)) -> UserRead:
     return _to_user_read(current_user)
+
+
+@router.patch("/me", response_model=UserRead)
+def update_me(
+    payload: UserProfileUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> UserRead:
+    if payload.email is not None:
+        normalized = payload.email.lower()
+        if normalized != current_user.email:
+            existing = auth_service.get_user_by_email(db, normalized)
+            if existing and existing.id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={"code": "conflict", "message": "Email already registered"},
+                )
+            current_user.email = normalized
+    if payload.full_name is not None:
+        current_user.full_name = payload.full_name.strip() or None
+    auth_service.create_audit_log(
+        db,
+        "auth.profile_updated",
+        user=current_user,
+        resource_type="user",
+        resource_id=current_user.id,
+        ip_address=_client_ip(request),
+    )
+    db.commit()
+    db.refresh(current_user)
+    return _to_user_read(current_user)
+
+
+@router.post("/change-password", response_model=Message)
+def change_password(
+    payload: PasswordChange,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> Message:
+    if not verify_password(payload.current_password, current_user.hashed_password):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "invalid_password", "message": "Current password is incorrect"},
+        )
+    try:
+        validate_password_policy(payload.new_password)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"code": "weak_password", "message": str(exc)},
+        ) from exc
+    current_user.hashed_password = get_password_hash(payload.new_password)
+    auth_service.revoke_all_refresh_tokens(db, current_user, ip_address=_client_ip(request))
+    auth_service.create_audit_log(
+        db,
+        "auth.password_changed",
+        user=current_user,
+        resource_type="user",
+        resource_id=current_user.id,
+        ip_address=_client_ip(request),
+    )
+    db.commit()
+    return Message(message="Password updated")

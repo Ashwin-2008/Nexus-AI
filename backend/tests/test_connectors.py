@@ -117,6 +117,23 @@ class TestCredentialEncryption:
 # ---------------------------------------------------------------------------
 
 
+def test_sql_connection_url_injects_encrypted_credentials():
+    import sqlalchemy as sa
+
+    from app.services.safe_sql import _connection_url
+
+    context = ConnectorContext(
+        config={"connection_url": "postgresql://db.internal:5432/knowledge"},
+        credentials={"username": "readonly_user", "password": "not-in-config"},
+    )
+    parsed = sa.engine.make_url(_connection_url(context, "postgres"))
+    assert parsed.username == "readonly_user"
+    assert parsed.password == "not-in-config"
+    assert str(parsed.host) == "db.internal"
+
+
+
+
 class TestWebsiteConnector:
     def test_validate(self):
         c = get_connector("website")

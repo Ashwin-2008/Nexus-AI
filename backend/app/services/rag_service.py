@@ -222,7 +222,9 @@ class RagPipeline:
     def __init__(self) -> None:
         self.use_llm = llm_available()
 
-    def run(self, db: Session, organization_id, query: str) -> RagResult:
+    def run(
+        self, db: Session, organization_id, query: str, *, conversation_id: str | None = None
+    ) -> RagResult:
         scope = _scope(organization_id)
         response = _orchestrator().answer(
             db,
@@ -232,6 +234,7 @@ class RagPipeline:
                 scope=scope,
                 filters=RetrievalFilters(),
                 top_k=settings.rag_max_context_chunks,
+                conversation_id=conversation_id,
             ),
         )
         return RagResult(
@@ -254,13 +257,16 @@ class RagPipeline:
             degraded_from=response.degraded_from,
         )
 
-    def run_streaming(self, db: Session, organization_id, query: str) -> Iterator[dict[str, Any]]:
+    def run_streaming(
+        self, db: Session, organization_id, query: str, *, conversation_id: str | None = None
+    ) -> Iterator[dict[str, Any]]:
         scope = _scope(organization_id)
         request = RagRequest(
             query=query,
             scope=scope,
             filters=RetrievalFilters(),
             top_k=settings.rag_max_context_chunks,
+            conversation_id=conversation_id,
         )
         for event in _orchestrator().stream(db, scope, request):
             name = event["event"]

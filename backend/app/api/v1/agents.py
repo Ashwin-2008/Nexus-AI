@@ -393,6 +393,12 @@ def _decide_approval(
         db.commit()
     if row.status != "pending":
         raise HTTPException(status_code=409, detail={"code": "already_decided", "message": "Approval is no longer pending"})
+    execution = db.get(AgentExecution, row.execution_id)
+    if execution is not None and execution.status in {"cancelled", "failed", "succeeded"}:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "execution_final", "message": "The linked execution is already final"},
+        )
     if row.requested_by == current_user.id and current_user.role.name != "admin":
         raise HTTPException(status_code=403, detail={"code": "self_approval_denied", "message": "The requester cannot approve this action"})
     row.status = "approved" if approved else "rejected"
@@ -465,13 +471,24 @@ def cancel_execution(
         raise HTTPException(status_code=404, detail={"code": "not_found", "message": "Execution not found"})
     if row.status in {"succeeded", "failed", "cancelled"}:
         raise HTTPException(status_code=409, detail={"code": "not_cancellable", "message": "Execution is already final"})
+    now = datetime.now(timezone.utc)
     row.status = "cancelled"
     row.error = "Cancelled by user"
-    row.finished_at = datetime.now(timezone.utc)
+    row.finished_at = now
     db.query(AgentExecutionStep).filter(
         AgentExecutionStep.execution_id == row.id,
         AgentExecutionStep.status.in_(["pending", "running"]),
     ).update({"status": "cancelled", "error": "Execution cancelled"}, synchronize_session=False)
+    # Revoke pending approvals so a cancelled execution cannot be approved later
+    # and trigger a high-risk action (for example SMTP delivery).
+    pending = db.query(AgentApprovalRequest).filter(
+        AgentApprovalRequest.execution_id == row.id,
+        AgentApprovalRequest.status == "pending",
+    ).all()
+    for approval in pending:
+        approval.status = "cancelled"
+        approval.decided_at = now
+        approval.rejection_reason = "Execution cancelled"
     db.add(AgentExecutionEvent(execution_id=row.id, event_type="execution.cancelled", payload=json.dumps({"user_id": str(current_user.id)})))
     db.add(AuditLog(organization_id=row.organization_id, user_id=current_user.id, action="agent_execution_cancelled", resource_type="agent_execution", resource_id=str(row.id)))
     db.commit()

@@ -2,10 +2,12 @@
 
 from typing import Any, Dict
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.api.deps import get_current_user
 from app.core.config import settings
 from app.db.session import engine
+from app.models.user import User
 
 router = APIRouter()
 
@@ -97,3 +99,57 @@ async def health() -> Dict[str, Any]:
     elif any(v == "unhealthy" for k, v in services.items() if k != "api"):
         overall = "degraded"
     return {"status": overall, "services": services}
+
+
+@router.get("/system/capabilities")
+def system_capabilities(current_user: User = Depends(get_current_user)) -> Dict[str, Any]:
+    """Secret-free runtime capability inventory for operators and the UI.
+
+    This is intentionally authenticated but not admin-only: every organization
+    member needs to know which retrieval, generation and connector capabilities
+    are actually configured for the deployment.
+    """
+    from app.rag.config import RagConfig
+
+    config = RagConfig.from_settings()
+    description = config.describe()
+    try:
+        from app.services.llm import llm_available
+
+        llm_ok = llm_available()
+    except Exception:
+        llm_ok = False
+    embedding_provider = str(settings.embedding_provider or "hashing")
+    return {
+        "providers": {
+            "llm": {
+                "provider": settings.llm_provider,
+                "available": llm_ok,
+                "extractive_fallback": True,
+                "model": settings.llm_model or "(provider default)",
+            },
+            "embeddings": {
+                "provider": embedding_provider,
+                "model": settings.embedding_model or settings.embedding_local_model,
+                "dimensions": settings.embedding_dimensions or None,
+                "semantic": embedding_provider != "hashing",
+            },
+            "vector": {
+                "backend": settings.vector_index_backend,
+                "collection": settings.qdrant_collection,
+            },
+            "storage": {
+                "backend": settings.storage_backend,
+            },
+        },
+        "retrieval": description["retrieval"],
+        "chunking": description["chunking"],
+        "verification": description["verification"],
+        "worker": {
+            "celery_enabled": bool(settings.ingestion_use_celery),
+            "max_ingestion_retries": settings.ingestion_max_retries,
+        },
+        "connectors": ["postgres", "mysql", "rest", "website", "github", "gdrive", "email"],
+        "warnings": description["warnings"],
+        "organization_id": str(current_user.organization_id),
+    }

@@ -58,8 +58,8 @@ def match_claim(claim: str, evidence: list[EvidenceChunk]) -> EvidenceMatch:
     evidence_negated = bool(_NEGATION_RE.search(combined))
     negation_mismatch = bool(claim_negated != evidence_negated and (claim_numbers or wanted))
 
-    # Conflicting polarity inside the retrieved evidence about the same terms.
-    contradictory = _contradictory_polarity(claim, evidence)
+    # Conflicting polarity or mutually exclusive numbers about the same terms.
+    contradictory = _contradictory_polarity(claim, evidence) or _numeric_conflict(claim, evidence)
 
     score = 0.75 * coverage + 0.15 * phrase_bonus + 0.10 * (
         0.0 if not claim_numbers else 1.0 - len(unsupported_numbers) / len(claim_numbers)
@@ -85,6 +85,30 @@ def match_claim(claim: str, evidence: list[EvidenceChunk]) -> EvidenceMatch:
         negation_mismatch=negation_mismatch,
         contradictory=contradictory,
     )
+
+
+def _numeric_conflict(claim: str, evidence: list[EvidenceChunk]) -> bool:
+    """Flag claims whose numbers are all absent from otherwise matching evidence.
+
+    This is a review signal, not proof: a derived total can legitimately differ
+    from every source number. Only fires when the claim and evidence share most
+    terms but have disjoint number sets.
+    """
+    claim_numbers = {normalize_number(value) for value in _NUMBER_RE.findall(claim)}
+    if not claim_numbers:
+        return False
+    terms = set(query_terms(claim))
+    if not terms:
+        return False
+    for item in evidence:
+        text = item.text or ""
+        words = set(re.findall(r"[A-Za-zÀ-ÿ0-9']+", text.lower()))
+        if len(terms & words) / max(1, len(terms)) < 0.6:
+            continue
+        evidence_numbers = {normalize_number(value) for value in _NUMBER_RE.findall(text)}
+        if evidence_numbers and not (claim_numbers & evidence_numbers):
+            return True
+    return False
 
 
 def _contradictory_polarity(claim: str, evidence: list[EvidenceChunk]) -> bool:

@@ -42,12 +42,31 @@ def _connection_url(ctx: ConnectorContext, driver: str) -> str:
     if driver == "postgres":
         if not url.startswith(("postgresql://", "postgresql+psycopg://", "postgres://")):
             raise ConnectorError("postgres connection_url must start with postgresql:// or postgres://")
-        return url.replace("postgres://", "postgresql://", 1)
-    if driver == "mysql":
+        url = url.replace("postgres://", "postgresql://", 1)
+    elif driver == "mysql":
         if not url.startswith(("mysql://", "mysql+pymysql://")):
             raise ConnectorError("mysql connection_url must start with mysql:// or mysql+pymysql://")
-        return url.replace("mysql://", "mysql+pymysql://", 1)
-    raise ConnectorError("Unsupported database connector")
+        url = url.replace("mysql://", "mysql+pymysql://", 1)
+    else:
+        raise ConnectorError("Unsupported database connector")
+
+    # Encrypted credentials hold the password for SQL connectors; the
+    # connection URL in config intentionally omits it so organization-visible
+    # configuration never contains a database secret.
+    password = ctx.credentials.get("password")
+    if password:
+        import sqlalchemy as sa
+
+        username = ctx.credentials.get("username")
+        try:
+            parsed = sa.engine.make_url(url)
+            url = parsed.set(
+                username=str(username) if username else parsed.username,
+                password=str(password),
+            ).render_as_string(hide_password=False)
+        except Exception as exc:  # noqa: BLE001
+            raise ConnectorError(f"{driver} connection_url is invalid: {exc}") from exc
+    return url
 
 
 def execute_read_only_sql(ctx: ConnectorContext, query: str, max_rows: int = 100) -> dict[str, Any]:

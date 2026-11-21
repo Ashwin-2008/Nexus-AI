@@ -1,27 +1,28 @@
 import React from 'react'
-import { useLocation } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 
 export interface NavLinkProps {
   to: string
   children: React.ReactNode
   className?: string
+  icon?: React.ReactNode
+  end?: boolean
+  onClick?: () => void
 }
 
-export function NavLink({ to, children, className, ...props }: NavLinkProps) {
+export function NavLink({ to, children, className = '', icon, end = false, onClick }: NavLinkProps) {
   const location = useLocation()
-  const isActive = location.pathname === to
+  const isActive = end ? location.pathname === to : location.pathname === to || location.pathname.startsWith(`${to}/`)
 
   return (
-    <a
-      href={to}
-      className={`
-        inline-flex items-center rounded-md px-3 py-2 text-sm font-medium 
-        ${isActive ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-primary'}
-        ${className}
-      `}
-      {...props}
+    <Link
+      to={to}
+      onClick={onClick}
+      aria-current={isActive ? 'page' : undefined}
+      className={`nx-nav-link ${isActive ? 'is-active' : ''} ${className}`}
     >
+      {icon}
       {children}
-    </a>
+    </Link>
   )
 }

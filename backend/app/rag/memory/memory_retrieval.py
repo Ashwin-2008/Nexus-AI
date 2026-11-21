@@ -7,10 +7,11 @@ memory can bypass current permissions.
 from __future__ import annotations
 
 import json
+import uuid
 
 from sqlalchemy.orm import Session
 
-from app.models.chat import ChatMessage
+from app.models.chat import ChatMessage, Conversation
 from app.rag.retrieval.filters import revalidate_evidence
 from app.rag.types import EvidenceChunk, RagScope, RetrievalFilters
 
@@ -24,9 +25,22 @@ def prior_evidence(
 ) -> list[EvidenceChunk]:
     if not conversation_id:
         return []
+    try:
+        conversation_uuid = uuid.UUID(str(conversation_id))
+    except ValueError:
+        return []
+    conversation = db.get(Conversation, conversation_uuid)
+    if conversation is None or str(conversation.organization_id) != str(scope.organization_id):
+        return []
+    if scope.user_id and str(conversation.user_id) != str(scope.user_id):
+        return []
     message = (
         db.query(ChatMessage)
-        .filter(ChatMessage.conversation_id == conversation_id, ChatMessage.role == "assistant")
+        .filter(
+            ChatMessage.conversation_id == conversation_uuid,
+            ChatMessage.organization_id == conversation.organization_id,
+            ChatMessage.role == "assistant",
+        )
         .order_by(ChatMessage.created_at.desc())
         .first()
     )

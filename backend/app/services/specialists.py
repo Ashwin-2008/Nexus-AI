@@ -195,7 +195,21 @@ def database_agent(
     }
 
 
-def analytics_agent(dataset: dict[str, Any]) -> dict[str, Any]:
+def _citations_from_inputs(inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    citations: dict[str, dict[str, Any]] = {}
+    for item in inputs or []:
+        if not isinstance(item, dict):
+            continue
+        for citation in item.get("citations") or []:
+            if isinstance(citation, dict) and citation.get("chunk_id"):
+                citations.setdefault(str(citation["chunk_id"]), citation)
+    return list(citations.values())
+
+
+def analytics_agent(
+    dataset: dict[str, Any],
+    inputs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     rows = dataset.get("rows", [])
     columns = dataset.get("columns", [])
     numeric = {}
@@ -227,6 +241,9 @@ def analytics_agent(dataset: dict[str, Any]) -> dict[str, Any]:
         "method": "descriptive statistics over returned database rows",
         "source_id": dataset.get("source_id"),
         "sql": dataset.get("sql"),
+        "citations": _citations_from_inputs(inputs or []),
+        "evidence": _evidence_payload(_evidence_from_inputs(inputs or [])),
+        "document_context_used": bool(inputs),
     }
 
 
@@ -391,13 +408,26 @@ def email_agent(
     if db is not None and organization_id is not None and source_id:
         try:
             result = search_email(db, organization_id, uuid.UUID(str(source_id)), request, 20)
+            knowledge = None
+            try:
+                retrieval = RagService().retrieve(
+                    db, _scope(organization_id), request, top_k=5
+                )
+                knowledge = {
+                    "citations": _evidence_payload(retrieval.evidence),
+                    "evidence": _evidence_payload(retrieval.evidence),
+                }
+            except Exception as exc:  # noqa: BLE001 — email results remain usable without docs
+                knowledge = {"citations": [], "evidence": [], "error": str(exc)[:200]}
             return {
                 "available": True,
                 "status": "succeeded",
                 "request": request,
                 "count": result["count"],
                 "messages": result["messages"],
-                "citations": [],
+                "citations": (knowledge or {}).get("citations", []),
+                "evidence": (knowledge or {}).get("evidence", []),
+                "knowledge_context": knowledge,
             }
         except (ConnectorError, ValueError) as exc:
             return {
@@ -505,7 +535,7 @@ def execute_specialist(
             raise ConnectorError("source_id is required for database intelligence")
         return database_agent(db, organization_id, source_id, request, sql, max_rows, scope)
     if agent_id == "analytics":
-        return analytics_agent((inputs or [{}])[-1])
+        return analytics_agent((inputs or [{}])[-1], inputs)
     if agent_id == "verification":
         return verification_agent(
             (inputs or [{}])[-1], organization_id=organization_id, inputs=inputs

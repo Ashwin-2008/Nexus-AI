@@ -78,6 +78,8 @@ class IngestionOrchestrator:
     ) -> tuple[Document, IngestionJob]:
         content_type = content_type or "application/octet-stream"
         safe_name = Path(filename or "upload.bin").name
+        if access_scope not in {"organization", "private", "admin"}:
+            raise ValidationError("access_scope must be organization, private or admin")
         if access_scope != "organization":
             role = user.role.name if getattr(user, "role", None) else "member"
             if role != "admin":

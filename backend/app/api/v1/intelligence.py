@@ -132,6 +132,79 @@ def list_reports(current_user: User = Depends(get_current_user), db: Session = D
     return db.query(Report).filter(Report.organization_id == current_user.organization_id).order_by(Report.created_at.desc()).limit(100).all()
 
 
+def _report_media_type(file_format: str) -> str:
+    return {
+        "pdf": "application/pdf",
+        "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "csv": "text/csv",
+        "md": "text/markdown",
+        "markdown": "text/markdown",
+    }.get(file_format, "application/octet-stream")
+
+
+def _safe_report_filename(title: str, file_format: str) -> str:
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", title).strip("._")[:80] or "report"
+    extension = "md" if file_format in {"md", "markdown"} else file_format
+    return f"{stem}.{extension}"
+
+
+@router.get("/reports/{report_id}/download")
+def report_download_by_metadata(
+    report_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Download a persisted report artifact by its metadata id.
+
+    The storage key is resolved server-side from the organization-scoped row so
+    callers cannot request arbitrary object paths.
+    """
+    row = db.get(Report, report_id)
+    if row is None or row.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=404, detail={"code": "report_not_found", "message": "Report not found"})
+    if not row.storage_key:
+        raise HTTPException(status_code=404, detail={"code": "report_not_found", "message": "Report artifact is missing"})
+    try:
+        content = get_storage_backend().get_bytes(row.storage_key)
+    except StorageError as exc:
+        raise HTTPException(status_code=404, detail={"code": "report_not_found", "message": "Report artifact not found"}) from exc
+    filename = _safe_report_filename(row.title, row.file_format)
+    return Response(
+        content=content,
+        media_type=_report_media_type(row.file_format),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.delete("/reports/{report_id}", status_code=204)
+def delete_report(
+    report_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    row = db.get(Report, report_id)
+    if row is None or row.organization_id != current_user.organization_id:
+        raise HTTPException(status_code=404, detail={"code": "report_not_found", "message": "Report not found"})
+    if row.storage_key:
+        try:
+            get_storage_backend().delete(row.storage_key)
+        except StorageError:
+            # Metadata removal should still succeed if the artifact is already gone.
+            pass
+    db.delete(row)
+    db.add(
+        AuditLog(
+            organization_id=current_user.organization_id,
+            user_id=current_user.id,
+            action="report_deleted",
+            resource_type="report",
+            resource_id=str(report_id),
+        )
+    )
+    db.commit()
+
+
 @router.get("/reports/{report_id}")
 def report_download(
     report_id: str,

@@ -254,12 +254,13 @@ class QdrantVectorIndex:
             qmodels.FieldCondition(key="document_id", match=qmodels.MatchValue(value=str(document_id))),
         ]
         try:
-            result = self.client.delete(
+            deleted = self.count_for_document(organization_id, document_id)
+            self.client.delete(
                 collection_name=self.collection,
                 points_selector=qmodels.FilterSelector(filter=qmodels.Filter(must=must_filters)),
                 wait=True,
             )
-            return int(getattr(result, "operation_id", 0) or 0) if result else 0
+            return int(deleted)
         except Exception as e:  # noqa: BLE001
             raise VectorIndexError(f"qdrant delete failed: {e}") from e
 
@@ -296,10 +297,20 @@ def get_vector_index(dimensions: int | None = None) -> QdrantVectorIndex:
     backend = (settings.vector_index_backend or "qdrant").strip().lower()
     if backend == "memory":
         # Explicitly configured ephemeral backend (tests / offline dev).
-        # Real cosine-similarity math, but data is lost on restart.
+        # Real cosine-similarity math, but data is lost on restart. A single
+        # process-wide instance is required: ingestion and query code construct
+        # the index independently and must see the same points.
         logger.warning("VECTOR_INDEX_BACKEND=memory: in-memory vector index in use; data is ephemeral.")
-        return InMemoryVectorIndex(dimensions=dimensions)
+        key = int(dimensions or settings.embedding_dimensions or 256)
+        index = _MEMORY_INDEXES.get(key)
+        if index is None:
+            index = InMemoryVectorIndex(dimensions=key)
+            _MEMORY_INDEXES[key] = index
+        return index
     return QdrantVectorIndex(dimensions=dimensions)
+
+
+_MEMORY_INDEXES: dict[int, "InMemoryVectorIndex"] = {}
 
 
 class InMemoryVectorIndex:

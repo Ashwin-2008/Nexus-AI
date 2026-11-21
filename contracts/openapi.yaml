@@ -1,8 +1,8 @@
 ﻿openapi: 3.0.3
 info:
   title: NEXUS AI API
-  version: 0.7.0
-  description: API contract for NEXUS AI authentication, document ingestion, grounded search/chat, connectors, durable agent workflows, safe SQL intelligence, and approvals.
+  version: 0.10.0
+  description: API contract for NEXUS AI authentication, document ingestion, grounded search/chat, the modular RAG subsystem, connectors, durable agent workflows, safe SQL intelligence, and approvals.
 servers:
   - url: http://localhost:8000
 components:
@@ -62,6 +62,9 @@ components:
             completion_tokens: { type: integer, nullable: true }
             insufficient_evidence: { type: boolean }
             degraded_from: { type: string, nullable: true }
+            verification: { allOf: [{ $ref: '#/components/schemas/RagVerification' }], nullable: true }
+            trace_id: { type: string }
+            warnings: { type: array, items: { type: string } }
         created_at: { type: string, format: date-time }
       required: [id, conversation_id, role, content, created_at]
     SourceCreate:
@@ -218,6 +221,237 @@ components:
         items:
           type: array
           items: { $ref: '#/components/schemas/DocumentRead' }
+    RagFilters:
+      type: object
+      additionalProperties: false
+      properties:
+        document_ids: { type: array, items: { type: string, format: uuid } }
+        source_ids: { type: array, items: { type: string, format: uuid } }
+        source_types: { type: array, items: { type: string } }
+        document_version: { type: integer, nullable: true }
+        metadata: { type: object, additionalProperties: { type: string } }
+    RagQueryRequest:
+      type: object
+      required: [query]
+      additionalProperties: false
+      properties:
+        query: { type: string, minLength: 1, maxLength: 8000 }
+        filters: { $ref: '#/components/schemas/RagFilters' }
+        mode: { type: string, enum: [hybrid, dense, sparse], nullable: true }
+        top_k: { type: integer, minimum: 1, maximum: 50, nullable: true }
+        rerank: { type: boolean, nullable: true }
+        verify: { type: boolean, nullable: true }
+        conversation_id: { type: string, nullable: true }
+        max_context_tokens: { type: integer, minimum: 256, maximum: 32000, nullable: true }
+        include_evidence: { type: boolean, default: true }
+    RagCitation:
+      type: object
+      properties:
+        citation_id: { type: string }
+        index: { type: integer }
+        chunk_id: { type: string, format: uuid }
+        document_id: { type: string, format: uuid }
+        document_title: { type: string }
+        document_filename: { type: string }
+        source_type: { type: string }
+        organization_id: { type: string, format: uuid }
+        document_version: { type: integer }
+        page_number: { type: integer, nullable: true }
+        section_heading: { type: string, nullable: true }
+        source_span: { type: object, nullable: true }
+        url: { type: string, nullable: true }
+        file_reference: { type: string, nullable: true }
+        source_id: { type: string, nullable: true }
+        score: { type: number }
+        evidence_text: { type: string }
+        text: { type: string }
+        provenance: { type: array, items: { type: object } }
+    RagVerificationClaim:
+      type: object
+      properties:
+        claim: { type: string }
+        status: { type: string, enum: [supported, partially_supported, unsupported, conflicting_evidence, insufficient_evidence] }
+        citation_indices: { type: array, items: { type: integer } }
+        evidence_chunk_ids: { type: array, items: { type: string } }
+        support_score: { type: number }
+        reasons: { type: array, items: { type: string } }
+        unsupported_numbers: { type: array, items: { type: string } }
+    RagVerification:
+      type: object
+      properties:
+        status: { type: string, enum: [supported, partially_supported, unsupported, conflicting_evidence, insufficient_evidence] }
+        claims: { type: array, items: { $ref: '#/components/schemas/RagVerificationClaim' } }
+        unsupported_claims: { type: array, items: { type: string } }
+        conflicting_claims: { type: array, items: { type: string } }
+        insufficient_claims: { type: array, items: { type: string } }
+        citation_errors: { type: array, items: { type: string } }
+        evidence_coverage: { type: number }
+        method: { type: string }
+        disclaimer: { type: string }
+    RagQueryResponse:
+      type: object
+      properties:
+        answer: { type: string }
+        answer_mode: { type: string, enum: [llm, extractive, no_evidence] }
+        model: { type: string }
+        citations: { type: array, items: { $ref: '#/components/schemas/RagCitation' } }
+        evidence: { type: array, items: { type: object } }
+        verification: { allOf: [{ $ref: '#/components/schemas/RagVerification' }], nullable: true }
+        query_analysis: { type: object }
+        timings: { type: object, additionalProperties: { type: integer } }
+        trace_id: { type: string }
+        insufficient_evidence: { type: boolean }
+        warnings: { type: array, items: { type: string } }
+        retrieval_mode: { type: string }
+        reranker: { type: string, nullable: true }
+        degraded_from: { type: string, nullable: true }
+        context_chunk_count: { type: integer }
+    RagIngestTextRequest:
+      type: object
+      required: [content]
+      additionalProperties: false
+      properties:
+        content: { type: string, minLength: 1 }
+        filename: { type: string, maxLength: 255, default: text.txt }
+        title: { type: string, maxLength: 500, nullable: true }
+        content_type: { type: string, default: text/plain }
+        source_id: { type: string, format: uuid, nullable: true }
+        access_scope: { type: string, enum: [organization, private, admin], default: organization }
+        metadata: { type: object }
+    RagRetrievalTestRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string }
+        filters: { $ref: '#/components/schemas/RagFilters' }
+        mode: { type: string, enum: [hybrid, dense, sparse], nullable: true }
+        top_k: { type: integer, minimum: 1, maximum: 100, nullable: true }
+        rerank: { type: boolean, nullable: true }
+        include_text: { type: boolean, default: true }
+    RagEvaluationRequest:
+      type: object
+      properties:
+        dataset: { type: string, nullable: true }
+        items:
+          type: array
+          items:
+            type: object
+            required: [query]
+            properties:
+              query: { type: string }
+              relevant_chunk_ids: { type: array, items: { type: string } }
+              relevant_document_ids: { type: array, items: { type: string } }
+              reference_answer: { type: string, nullable: true }
+              tags: { type: array, items: { type: string } }
+        name: { type: string, default: evaluation }
+        mode: { type: string, enum: [hybrid, dense, sparse], nullable: true }
+        k: { type: integer, minimum: 1, maximum: 50, default: 5 }
+        generate: { type: boolean, default: false }
+        persist: { type: boolean, default: true }
+    UserProfileUpdate:
+      type: object
+      properties:
+        full_name: { type: string, maxLength: 255, nullable: true }
+        email: { type: string, format: email, nullable: true }
+    PasswordChange:
+      type: object
+      required: [current_password, new_password]
+      properties:
+        current_password: { type: string, minLength: 1, maxLength: 128 }
+        new_password: { type: string, minLength: 8, maxLength: 128 }
+    AdminOverview:
+      type: object
+      properties:
+        organization:
+          type: object
+          properties:
+            id: { type: string, format: uuid }
+            name: { type: string, nullable: true }
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+        role: { type: string, nullable: true }
+    AdminUser:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        full_name: { type: string, nullable: true }
+        role: { type: string, nullable: true }
+        is_active: { type: boolean }
+        created_at: { type: string, format: date-time }
+    AuditLogEntry:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, nullable: true }
+        action: { type: string }
+        resource_type: { type: string, nullable: true }
+        resource_id: { type: string, nullable: true }
+        details: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+    AnalyticsOverview:
+      type: object
+      properties:
+        window_days: { type: integer }
+        generated_at: { type: string, format: date-time }
+        queries:
+          type: object
+          properties:
+            total_all_time: { type: integer }
+            window: { type: integer }
+            successful: { type: integer }
+            no_evidence: { type: integer }
+            success_rate: { type: number, nullable: true }
+            avg_latency_ms: { type: number, nullable: true }
+            p95_latency_ms: { type: number, nullable: true }
+            avg_retrieval_ms: { type: number, nullable: true }
+        series:
+          type: array
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              queries: { type: integer }
+              avg_retrieval_ms: { type: number }
+              avg_total_ms: { type: number }
+              no_evidence: { type: integer }
+        distribution:
+          type: object
+          properties:
+            answer_modes: { type: object, additionalProperties: { type: integer } }
+            verification: { type: object, additionalProperties: { type: integer } }
+            retrieval_modes: { type: object, additionalProperties: { type: integer } }
+        agents:
+          type: object
+          properties:
+            total: { type: integer }
+            by_status: { type: object, additionalProperties: { type: integer } }
+            avg_duration_ms: { type: number, nullable: true }
+        knowledge:
+          type: object
+          properties:
+            documents_by_status: { type: object, additionalProperties: { type: integer } }
+            documents_total: { type: integer }
+            chunks: { type: integer }
+            sources: { type: integer }
+            active_sources: { type: integer }
+        activity:
+          type: object
+          properties:
+            conversations: { type: integer }
+            reports: { type: integer }
+            pending_approvals: { type: integer }
+            active_ingestions: { type: integer }
+        evaluation:
+          type: object
+          properties:
+            run_id: { type: string, nullable: true }
+            name: { type: string, nullable: true }
+            dataset: { type: string, nullable: true }
+            item_count: { type: integer, nullable: true }
+            metrics: { type: object, additionalProperties: { type: number } }
+            created_at: { type: string, nullable: true }
 paths:
   /:
     get:
@@ -349,6 +583,40 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+    patch:
+      summary: Update current user's profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UserProfileUpdate' }
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UserRead' }
+        '400': { description: Invalid profile }
+        '409': { description: Email already registered }
+  /api/v1/auth/change-password:
+    post:
+      summary: Change current user's password and revoke refresh tokens
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/PasswordChange' }
+      responses:
+        '200':
+          description: Password updated
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Message' }
+        '400': { description: Incorrect current password or weak new password }
   /api/v1/upload:
     post:
       summary: Upload document (compatibility alias for /api/v1/documents/upload)
@@ -1219,7 +1487,39 @@ paths:
           content:
             application/json:
               schema: { type: array, items: { type: object } }
+  /api/v1/intelligence/reports/{report_id}/download:
+    get:
+      summary: Download a persisted report artifact by metadata id
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: report_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Report file resolved from the organization-scoped metadata row
+          content:
+            text/markdown: {}
+            application/pdf: {}
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document: {}
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet: {}
+            text/csv: {}
+        '404': { description: Report not found }
   /api/v1/intelligence/reports/{report_id}:
+    delete:
+      summary: Delete a report metadata row and its stored artifact
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: report_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '204': { description: Report deleted }
+        '404': { description: Report not found }
     get:
       summary: Download an organization-scoped report export
       security:
@@ -1238,3 +1538,286 @@ paths:
           description: Report file
           content:
             application/octet-stream: {}
+  /api/v1/rag/query:
+    post:
+      summary: Run the shared grounded RAG pipeline
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagQueryRequest' }
+      responses:
+        '200':
+          description: Grounded answer with citations and verification
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RagQueryResponse' }
+        '401': { description: Unauthorized }
+        '422': { description: Validation error }
+  /api/v1/rag/query/stream:
+    post:
+      summary: Stream RAG events (rag_start, query_analysis, context, token, verification, rag_end, error)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagQueryRequest' }
+      responses:
+        '200':
+          description: Server-sent events
+          content:
+            text/event-stream:
+              schema: { type: string }
+  /api/v1/rag/retrieval/test:
+    post:
+      summary: Retrieve evidence without generation (diagnostics)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagRetrievalTestRequest' }
+      responses:
+        '200':
+          description: Ranked evidence, filters applied and timings
+  /api/v1/rag/ingest:
+    post:
+      summary: Ingest inline text/Markdown through the shared ingestion pipeline
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagIngestTextRequest' }
+      responses:
+        '202':
+          description: Document created and ingestion job queued
+  /api/v1/rag/ingest/file:
+    post:
+      summary: Upload and ingest a supported document
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+                title: { type: string, nullable: true }
+                source_id: { type: string, format: uuid, nullable: true }
+                access_scope: { type: string, enum: [organization, private, admin], default: organization }
+      responses:
+        '202': { description: Document created and ingestion job queued }
+        '413': { description: File exceeds the configured ingestion limit }
+        '422': { description: Validation error }
+  /api/v1/rag/ingestions/{job_id}:
+    get:
+      summary: Poll an ingestion job
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: job_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Ingestion job state and document metadata }
+        '404': { description: Not found }
+  /api/v1/rag/documents/{document_id}/reindex:
+    post:
+      summary: Re-index a document with the current chunking/embedding configuration
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '202': { description: Re-index job queued }
+        '403': { description: Forbidden }
+        '404': { description: Not found }
+  /api/v1/rag/documents/{document_id}/index:
+    delete:
+      summary: Delete a document's lexical and vector index entries (file retained)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Deleted chunk and vector counts }
+  /api/v1/rag/documents/{document_id}:
+    delete:
+      summary: Delete a document, its chunks, vectors and stored file
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Deletion summary }
+  /api/v1/rag/documents/{document_id}/sync:
+    get:
+      summary: Compare lexical chunk count with vector point count
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: document_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Index synchronization status }
+  /api/v1/rag/sources:
+    get:
+      summary: List indexed documents and configured connectors
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: Organization-scoped RAG sources }
+  /api/v1/rag/status:
+    get:
+      summary: RAG document/chunk/index/synchronization status
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: RAG status summary }
+  /api/v1/rag/config:
+    get:
+      summary: Inspect the secret-free RAG configuration (admin only)
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: RAG configuration description }
+        '403': { description: Forbidden }
+  /api/v1/rag/health:
+    get:
+      summary: RAG index health
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: ok or degraded index health }
+  /api/v1/rag/evaluation/run:
+    post:
+      summary: Run retrieval/generation evaluation and persist the report (admin only)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/RagEvaluationRequest' }
+      responses:
+        '200': { description: Evaluation metrics and item details }
+        '403': { description: Forbidden }
+  /api/v1/rag/evaluations:
+    get:
+      summary: List persisted evaluation runs (admin only)
+      security:
+        - bearerAuth: []
+      responses:
+        '200': { description: Evaluation run history }
+  /api/v1/rag/evaluations/{run_id}:
+    get:
+      summary: Read one persisted evaluation run (admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: path
+          name: run_id
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200': { description: Evaluation run detail }
+        '404': { description: Not found }
+  /api/v1/admin/overview:
+    get:
+      summary: Organization overview and entity counts (admin only)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Organization overview
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AdminOverview' }
+        '403': { description: Administrator role required }
+  /api/v1/admin/users:
+    get:
+      summary: List organization users (admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+        - { in: query, name: offset, schema: { type: integer, default: 0, minimum: 0 } }
+      responses:
+        '200':
+          description: Organization users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AdminUser' }
+        '403': { description: Administrator role required }
+  /api/v1/admin/audit-logs:
+    get:
+      summary: List organization audit log entries (admin only)
+      security:
+        - bearerAuth: []
+      parameters:
+        - { in: query, name: limit, schema: { type: integer, default: 100, minimum: 1, maximum: 500 } }
+      responses:
+        '200':
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditLogEntry' }
+        '403': { description: Administrator role required }
+  /api/v1/system/capabilities:
+    get:
+      summary: Secret-free provider, retrieval, worker and connector capability inventory
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Resolved runtime capabilities
+          content:
+            application/json:
+              schema: { type: object }
+        '401': { description: Unauthorized }
+  /api/v1/analytics/overview:
+    get:
+      summary: Organization retrieval, agent and knowledge analytics
+      security:
+        - bearerAuth: []
+      parameters:
+        - { in: query, name: days, schema: { type: integer, default: 14, minimum: 7, maximum: 90 } }
+      responses:
+        '200':
+          description: Aggregated analytics
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AnalyticsOverview' }
+        '401': { description: Unauthorized }
