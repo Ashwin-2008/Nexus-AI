@@ -28,6 +28,14 @@ def _make_app():
             "app.worker.tasks.*": {"queue": "ingestion"},
         },
     )
+    if broker.startswith("rediss://"):
+        # Managed Redis endpoints (e.g. Upstash) use TLS. Celery requires the
+        # SSL parameters to be given explicitly for rediss:// URLs; Upstash
+        # serves a certificate signed by a public CA, so verification settings
+        # are left at defaults and only cert-reqs is relaxed.
+        ssl_options = {"ssl_cert_reqs": None}
+        app.conf.broker_use_ssl = ssl_options
+        app.conf.redis_backend_use_ssl = ssl_options
     return app
 
 

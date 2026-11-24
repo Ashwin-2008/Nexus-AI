@@ -14,8 +14,9 @@ if [ ! -f .env ]; then
   cp .env.example .env
   # Generate a random JWT secret
   JWT=$(openssl rand -hex 32 2>/dev/null || python3 -c "import secrets; print(secrets.token_hex(32))")
-  sed -i.bak "s/change_me_generate_with_openssl_rand_hex_32/$JWT/" .env && rm -f .env.bak
-  echo "✓ Created .env — fill in POSTGRES_PASSWORD, REDIS_PASSWORD, MINIO_ACCESS_KEY, MINIO_SECRET_KEY, OPENAI_API_KEY"
+  sed -i.bak "s/^JWT_SECRET=$/JWT_SECRET=$JWT/" .env && rm -f .env.bak
+  echo "✓ Created .env — fill in DATABASE_URL (Supabase), SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY,"
+  echo "  REDIS_URL (Upstash), QDRANT_URL/QDRANT_API_KEY and OPENAI_API_KEY. See docs/DEPLOYMENT.md."
 else
   echo "✓ .env already exists"
 fi
@@ -42,5 +43,7 @@ echo ""
 echo "Services will be available at:"
 echo "  App:       http://localhost"
 echo "  API:       http://localhost/api/v1"
-echo "  Grafana:   http://localhost/grafana"
-echo "  MinIO:     http://localhost:9001  (dev only)"
+echo "  Grafana:   http://localhost/grafana   (optional local monitoring)"
+echo "  Qdrant:    http://localhost:6333"
+echo ""
+echo "Documents are stored in Supabase Storage (SUPABASE_* in .env)."

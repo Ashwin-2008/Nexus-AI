@@ -89,7 +89,7 @@ Prompts are Markdown templates in `backend/app/prompts/` (`rag/`, `system/`, `ag
 - PostgreSQL: documents (hash/source/version/scope), chunks (heading/parent/hash/tokens/strategy/version/scope), document versions, query telemetry, evaluation runs, conversations/messages, connectors, agent executions, reports.
 - Qdrant: chunk vectors and payloads including organization/document/chunk ids, source id, version and access scope. Collection `nexus_chunks`, cosine distance.
 - Lexical: BM25 over organization chunk rows in PostgreSQL/SQLite.
-- Object storage: local or MinIO under organization-scoped keys.
+- Object storage: Supabase Storage (default), an S3-compatible MinIO instance, or local disk — selected by `STORAGE_BACKEND`, organization-scoped keys.
 
 ## Integration Boundaries
 

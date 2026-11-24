@@ -1,17 +1,21 @@
 # Nexus AI – Project State
 
 Last updated: 2026-11-21
-Updated by: RAG implementation pass
+Updated by: RAG implementation pass; Supabase Storage + Render/Vercel deployment pass
 
 ## Overall Status
 
 The modular RAG subsystem is implemented and wired through the existing backend. Upload, connectors, chat, specialists, supervisor executions and the main chat API all use the same retrieval/generation path in `backend/app/rag`. No second agent framework, vector database, embedding provider, or retrieval implementation was added.
 
 Validation in this environment (no live Docker/Postgres/Qdrant, no valid LLM/embedding API key):
-- Backend suite: **124 passed** (SQLite, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`, Celery disabled).
+- Backend suite: **138 passed** (SQLite, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`, Celery disabled; 14 of these cover the Supabase Storage backend with a mocked HTTP transport).
 - Frontend: `npm run type-check`, `npm run lint` and `npm run build` passed after the 3D dual-theme redesign.
 - Alembic: single head `0014_rag_metadata`; migration **not applied to a live PostgreSQL instance** in this environment.
-- Live Qdrant, live LLM generation, real semantic embeddings, MinIO, Redis/Celery, and external connectors were **not live-verified**.
+- Live Qdrant, live LLM generation, real semantic embeddings, Supabase Storage/MinIO, Redis/Celery, and external connectors were **not live-verified**.
+
+## Deployment Topology
+
+Production targets Supabase (PostgreSQL + document storage), Render (FastAPI + Celery worker), Vercel (frontend), Upstash (Redis) and Grafana Cloud (monitoring); Qdrant Cloud supplies the vector index. Full instructions and the environment-variable tables are in `docs/DEPLOYMENT.md`, and `render.yaml` is the blueprint. `backend/app/services/storage.py` gained a `supabase` backend (Storage REST API, service-role key, auto-created private bucket); `STORAGE_BACKEND=auto` prefers Supabase, then MinIO, then local disk, and each document records the backend that stored it.
 
 ## Implemented RAG Capabilities
 

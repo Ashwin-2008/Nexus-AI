@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import List, Optional
 
@@ -27,14 +27,23 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     qdrant_url: str = "http://localhost:6333"
 
-    # Object storage (MinIO / S3-compatible)
+    # Object storage — auto|supabase|minio|local
+    # auto: Supabase Storage when SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are
+    # set, else MinIO when configured, else the local filesystem.
+    storage_backend: str = "auto"
+    storage_root: str = "storage"
+
+    # Supabase Storage (managed document storage; REST API v1).
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_storage_bucket: str = "nexus-documents"
+
+    # Self-hosted MinIO / S3-compatible storage (optional alternative)
     minio_endpoint: str = "localhost:9000"
     minio_access_key: str = ""
     minio_secret_key: str = ""
     minio_bucket: str = "nexus-documents"
     minio_secure: bool = False
-    storage_backend: str = "auto"  # auto|minio|local
-    storage_root: str = "storage"
 
     # Ingestion / worker
     ingestion_max_retries: int = 3

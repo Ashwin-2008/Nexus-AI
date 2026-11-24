@@ -1,7 +1,7 @@
 """Connector sync: fetch external items and ingest them as Documents.
 
 Items are stored through the same storage + ingestion pipeline as uploads
-(MinIO/local → extraction → chunking → embeddings → Qdrant), so connector
+(Supabase/MinIO/local → extraction → chunking → embeddings → Qdrant), so connector
 content lands in the same knowledge base, search and RAG paths.
 
 Deduplication: documents are keyed by org + deterministic filename

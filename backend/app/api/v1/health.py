@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from typing import Any, Dict
 
@@ -46,7 +46,12 @@ def _check_qdrant() -> str:
     if QdrantClient is None:
         return "unavailable"
     try:
-        client = QdrantClient(url=settings.qdrant_url, timeout=1)
+        client = QdrantClient(
+            url=settings.qdrant_url,
+            api_key=settings.qdrant_api_key or None,
+            timeout=2,
+            check_compatibility=False,
+        )
         client.get_collections()
         return "healthy"
     except Exception:
@@ -60,6 +65,15 @@ def _check_storage() -> str:
         return get_storage_backend().health_check()
     except Exception:
         return "unhealthy"
+
+
+def _storage_backend_name() -> str:
+    try:
+        from app.services.storage import get_storage_backend
+
+        return get_storage_backend().name
+    except Exception:
+        return settings.storage_backend
 
 
 def _check_worker() -> str:
@@ -139,7 +153,9 @@ def system_capabilities(current_user: User = Depends(get_current_user)) -> Dict[
                 "collection": settings.qdrant_collection,
             },
             "storage": {
-                "backend": settings.storage_backend,
+                "backend": _storage_backend_name(),
+                "configured": settings.storage_backend,
+                "bucket": settings.supabase_storage_bucket or settings.minio_bucket,
             },
         },
         "retrieval": description["retrieval"],

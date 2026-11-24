@@ -1,0 +1,96 @@
+# Render blueprint for the NEXUS AI backend.
+# Supabase provides PostgreSQL + document storage, Upstash provides Redis,
+# Qdrant Cloud provides the vector index, Grafana Cloud scrapes /metrics.
+#
+# Secrets live in the `nexus-shared` environment group so the API and the worker
+# always agree on SECRET_KEY (connector credentials are encrypted with it).
+# In the Render dashboard open the group once and paste each `sync: false` value.
+# Docs: https://render.com/docs/blueprint-spec
+
+envVarGroups:
+  - name: nexus-shared
+    envVars:
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_BASE_URL
+        sync: false
+      - key: LLM_MODEL
+        sync: false
+      - key: EMBEDDING_PROVIDER
+        sync: false
+      - key: EMBEDDING_DIMENSIONS
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+
+services:
+  - type: web
+    name: nexus-api
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - fromGroup: nexus-shared
+      - key: ENVIRONMENT
+        value: production
+      - key: SUPABASE_STORAGE_BUCKET
+        value: nexus-documents
+      - key: STORAGE_BACKEND
+        value: supabase
+      - key: QDRANT_COLLECTION
+        value: nexus_chunks
+      - key: VECTOR_INDEX_BACKEND
+        value: qdrant
+      - key: INGESTION_USE_CELERY
+        value: "true"
+      - key: LLM_PROVIDER
+        value: openai_compatible
+      - key: LOG_LEVEL
+        value: INFO
+
+  - type: worker
+    name: nexus-worker
+    runtime: docker
+    plan: starter
+    region: oregon
+    dockerfilePath: ./backend/Dockerfile.worker
+    dockerContext: ./backend
+    autoDeploy: true
+    envVars:
+      - fromGroup: nexus-shared
+      - key: ENVIRONMENT
+        value: production
+      - key: SUPABASE_STORAGE_BUCKET
+        value: nexus-documents
+      - key: STORAGE_BACKEND
+        value: supabase
+      - key: QDRANT_COLLECTION
+        value: nexus_chunks
+      - key: VECTOR_INDEX_BACKEND
+        value: qdrant
+      - key: INGESTION_USE_CELERY
+        value: "true"
+      - key: LLM_PROVIDER
+        value: openai_compatible
+      - key: WORKER_CONCURRENCY
+        value: "2"
+      - key: LOG_LEVEL
+        value: INFO

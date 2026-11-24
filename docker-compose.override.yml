@@ -2,7 +2,23 @@
 # Exposes service ports directly for local debugging
 
 services:
+  # Full local postgres definition (base compose keeps it commented out so
+  # production can point DATABASE_URL at an external database like Supabase).
   postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-nexus}
+      POSTGRES_USER: ${POSTGRES_USER:-nexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nexus-internal
     ports:
       - "5432:5432"
 
@@ -11,14 +27,8 @@ services:
       - "6333:6333"
       - "6334:6334"
 
-  redis:
-    ports:
-      - "6379:6379"
-
-  minio:
-    ports:
-      - "9000:9000"
-      - "9001:9001"
+  # Local redis/minio containers removed — REDIS_URL (Upstash) and Supabase
+  # Storage from .env are used in every mode.
 
   backend:
     ports:
@@ -27,12 +37,18 @@ services:
       - ./backend:/app
     environment:
       LOG_LEVEL: DEBUG
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   worker:
     volumes:
       - ./backend:/app
     environment:
       LOG_LEVEL: DEBUG
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   frontend:
     ports:

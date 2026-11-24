@@ -229,10 +229,13 @@ class IngestionOrchestrator:
         storage_backend = getattr(document, "storage_backend", None)
         storage_deleted = False
         try:
-            if storage_backend == "minio":
-                from app.services.storage import MinioStorageBackend
+            if storage_backend in {"supabase", "minio"}:
+                from app.services.storage import MinioStorageBackend, SupabaseStorageBackend
 
-                MinioStorageBackend().delete(storage_key)
+                hint_backend = (
+                    SupabaseStorageBackend() if storage_backend == "supabase" else MinioStorageBackend()
+                )
+                hint_backend.delete(storage_key)
                 storage_deleted = True
             else:
                 get_storage_backend().delete(storage_key)

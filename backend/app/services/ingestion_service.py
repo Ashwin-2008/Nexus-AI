@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -76,11 +76,22 @@ def secure_store(org_id: uuid.UUID, filename: str, data: bytes, content_type: st
 
 def load_document_bytes(storage_path: str, storage_backend: str | None = None) -> bytes:
     # Try hinted backend first, then fallbacks for migration/compat
-    from app.services.storage import LocalStorageBackend, MinioStorageBackend, get_storage_backend
+    from app.services.storage import (
+        LocalStorageBackend,
+        MinioStorageBackend,
+        SupabaseStorageBackend,
+        get_storage_backend,
+    )
 
     errors = []
     candidates = []
-    if storage_backend == "minio":
+    if storage_backend == "supabase":
+        try:
+            candidates.append(SupabaseStorageBackend())
+        except Exception:
+            pass
+        candidates.append(LocalStorageBackend())
+    elif storage_backend == "minio":
         try:
             candidates.append(MinioStorageBackend())
         except Exception:

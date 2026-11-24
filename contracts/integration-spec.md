@@ -1,4 +1,4 @@
-﻿# NEXUS AI - Integration Specification
+# NEXUS AI - Integration Specification
 
 Version: 0.4.0 (draft)
 Status: backend Milestone 1 auth security increments added (refresh/logout/password policy/audit scaffolding) on top of Milestone 3 foundations — 2026-11-14
@@ -56,7 +56,7 @@ Shared contract between Frontend (Cline, `frontend/`), Backend (Kiro), and Platf
 - Event format/types TBD (`token`, `citations`, `done`, `error`).
 
 ## Storage & processing (current)
-- Storage abstraction: MinIO/local, org-isolated keys, configurable; graceful fallback. Live MinIO ops not fully verified in all environments.
+- Storage abstraction: Supabase Storage (default) / MinIO / local, org-isolated keys `orgs/{org_id}/documents/...`, configurable via `STORAGE_BACKEND`; graceful fallback. Supabase ops covered by mocked-transport unit tests; live cloud ops not verified in this environment.
 - Processing foundation interfaces only (no RAG retrieval/citations/answers).
 
 ## Change Log

@@ -2,22 +2,25 @@ services:
 
   # ── Infrastructure ─────────────────────────────────────────────────────────
 
-  postgres:
-    image: postgres:15-alpine
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-nexus}
-      POSTGRES_USER: ${POSTGRES_USER:-nexus}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - nexus-internal
+  # Local postgres is DISABLED by default — set DATABASE_URL in .env to use an
+  # external managed database (e.g. Supabase). For local dev, the override file
+  # (docker-compose.override.yml) re-enables this service automatically.
+  # postgres:
+  #   image: postgres:15-alpine
+  #   restart: unless-stopped
+  #   environment:
+  #     POSTGRES_DB: ${POSTGRES_DB:-nexus}
+  #     POSTGRES_USER: ${POSTGRES_USER:-nexus}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+  #   volumes:
+  #     - postgres_data:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nexus} -d ${POSTGRES_DB:-nexus}"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     - nexus-internal
 
   qdrant:
     image: qdrant/qdrant:v1.9.2
@@ -33,56 +36,26 @@ services:
     networks:
       - nexus-internal
 
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
-    volumes:
-      - redis_data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks:
-      - nexus-internal
+  # Local redis is DISABLED by default — set REDIS_URL in .env to use a managed
+  # Redis (e.g. Upstash). For local dev, the override file
+  # (docker-compose.override.yml) re-enables this service automatically.
+  # redis:
+  #   image: redis:7-alpine
+  #   restart: unless-stopped
+  #   command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+  #   volumes:
+  #     - redis_data:/data
+  #   healthcheck:
+  #     test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     - nexus-internal
 
-  minio:
-    # MinIO removed their official images from Docker Hub (2025).
-    # bitnamilegacy/minio is the maintained source currently pullable without auth.
-    image: bitnamilegacy/minio:2024
-    restart: unless-stopped
-    # Bitnami run.sh executes: minio server --console-address :9001 (default)
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
-      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
-    volumes:
-      - minio_data:/bitnami/minio/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
-      interval: 15s
-      timeout: 10s
-      retries: 5
-    networks:
-      - nexus-internal
-
-  minio-init:
-    # Creates the documents bucket and ensures it is private.
-    image: bitnamilegacy/minio-client:2024
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: ["/bin/bash", "-c"]
-    # Credentials passed via MC_HOST_<alias> env var, not argv (avoids process-list exposure)
-    command: >
-      '/opt/bitnami/minio-client/bin/mc mb --ignore-existing "local/$${MINIO_BUCKET}" &&
-       /opt/bitnami/minio-client/bin/mc anonymous set none "local/$${MINIO_BUCKET}" &&
-       echo "MinIO bucket ready"'
-    environment:
-      MC_HOST_local: http://${MINIO_ACCESS_KEY}:${MINIO_SECRET_KEY}@minio:9000
-      MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
-    networks:
-      - nexus-internal
+  # Document storage is Supabase Storage (see SUPABASE_* below). The old
+  # MinIO container pair is disabled: set STORAGE_BACKEND=minio and provide
+  # MINIO_* only if you deliberately run MinIO elsewhere.
 
   # ── Application ────────────────────────────────────────────────────────────
 
@@ -92,20 +65,22 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      # Matches Kiro's config.py field names
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexus}
+      # Matches Kiro's config.py field names.
+      # External database (Supabase): set DATABASE_URL in .env — it wins over this default.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://nexus:${POSTGRES_PASSWORD}@postgres:5432/nexus}
       QDRANT_URL: http://qdrant:6333
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Managed Redis (Upstash): set REDIS_URL in .env — it wins over this default.
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       SECRET_KEY: ${JWT_SECRET:?JWT_SECRET is required}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
       CORS_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost,http://localhost:3000}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       DEBUG: "false"
-      # MinIO / storage — Kiro must add these to config.py when implementing upload
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
+      # Document storage — Supabase Storage by default (auto -> supabase when set).
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-auto}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       # LLM provider (Groq is OpenAI-compatible: set OPENAI_BASE_URL to Groq)
       LLM_PROVIDER: ${LLM_PROVIDER:-auto}
@@ -122,13 +97,7 @@ services:
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
-      postgres:
-        condition: service_healthy
       qdrant:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
         condition: service_healthy
     healthcheck:
       # backend image installs curl, not wget
@@ -146,14 +115,16 @@ services:
       dockerfile: Dockerfile.worker
     restart: unless-stopped
     environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nexus}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-nexus}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://nexus:${POSTGRES_PASSWORD}@postgres:5432/nexus}
       QDRANT_URL: http://qdrant:6333
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      # Managed Redis (Upstash): set REDIS_URL in .env — it wins over this default.
+      REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
       SECRET_KEY: ${JWT_SECRET:?JWT_SECRET is required}
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
-      MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
+      # Document storage (must match backend settings)
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-auto}
+      SUPABASE_URL: ${SUPABASE_URL:-}
+      SUPABASE_SERVICE_ROLE_KEY: ${SUPABASE_SERVICE_ROLE_KEY:-}
+      SUPABASE_STORAGE_BUCKET: ${SUPABASE_STORAGE_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-auto}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
@@ -166,15 +137,6 @@ services:
       CHUNK_OVERLAP: ${CHUNK_OVERLAP:-150}
       WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-4}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-      minio-init:
-        condition: service_completed_successfully
     networks:
       - nexus-internal
 
@@ -247,7 +209,6 @@ volumes:
   postgres_data:
   qdrant_data:
   redis_data:
-  minio_data:
   prometheus_data:
   grafana_data:
 

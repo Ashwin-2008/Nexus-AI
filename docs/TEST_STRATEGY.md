@@ -74,7 +74,7 @@ Verify that the shared RAG subsystem:
 | `VECTOR_INDEX_BACKEND` | `memory` | `qdrant` |
 | `EMBEDDING_PROVIDER` | `hashing` (non-semantic, test only) | `local` or `openai_compatible` |
 | `INGESTION_USE_CELERY` | `false` | `true` with worker |
-| `STORAGE_BACKEND` | `local` | MinIO/S3 |
+| `STORAGE_BACKEND` | `local` | Supabase Storage (default in production) / MinIO / local |
 | LLM key | absent → extractive fallback | valid provider key |
 
 ## Gates for “Done”

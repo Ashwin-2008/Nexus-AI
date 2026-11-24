@@ -1,6 +1,6 @@
 # Nexus AI – Integration Status
 
-Last updated: 2026-11-21 (RAG subsystem integration)
+Last updated: 2026-11-21 (RAG subsystem integration; Supabase storage + Render/Vercel deployment)
 
 ## Ownership
 - Frontend: Cline (VS Code) — `frontend/`
@@ -35,6 +35,8 @@ Last updated: 2026-11-21 (RAG subsystem integration)
 | Evaluation metrics and persistence | ✅ | Recall/Precision/MRR/NDCG + `/rag/evaluation/run` integration test |
 | Frontend RAG console + chat verification badges | ✅ verified | `pages/rag.tsx`, `pages/chat.tsx`, `src/api.ts`; type-check, lint and production build passed |
 | Migration `0014_rag_metadata` | ⚠️ authored, head singular | `alembic heads` → `0014_rag_metadata`; live PostgreSQL not available |
+| Supabase Storage backend | ✅ unit-verified | `tests/test_storage_supabase.py` (mocked HTTP): upload/upsert, bucket auto-create, download, delete prefixes, HEAD+Range existence, health, factory precedence |
+| Deployment blueprint | ✅ config-validated | `render.yaml`; `docker compose config` clean after MinIO removal; see `docs/DEPLOYMENT.md` |
 | Frontend 3D redesign + dual theme | ✅ verified | `src/styles.css`, `src/theme.tsx`, `components/nx.tsx`, all pages; type-check/lint/build passed |
 | Admin/analytics/profile backend wiring | ✅ | `api/v1/admin.py`, `api/v1/analytics.py`, `auth.py` profile/password routes; `tests/test_admin_analytics_profile.py` |
 | Frontend live data (no Unavailable placeholders) | ✅ | Dashboard/analytics/admin/monitoring/profile call real endpoints; local API responses verified by tests |
@@ -46,7 +48,7 @@ Last updated: 2026-11-21 (RAG subsystem integration)
 | Live LLM generation | ⚠️ not live-verified | No valid API key; extractive fallback tested |
 | Real semantic embeddings | ⚠️ not live-verified | Hashing provider used in tests; OpenAI/local adapters implemented |
 | Celery/Redis/worker recovery | ⚠️ not live-verified | Celery disabled in tests |
-| MinIO | ⚠️ not live-verified | Local storage used in tests |
+| Supabase Storage / MinIO | ⚠️ not live-verified | Supabase backend unit-tested with a mocked transport; local storage used in tests |
 | External connector credentials/OAuth/SMTP | ⚠️ credential-dependent | Connector framework and error paths tested; no live provider |
 
 ## Backend Validation
@@ -54,7 +56,7 @@ Last updated: 2026-11-21 (RAG subsystem integration)
 ```
 cd backend
 python -m pytest -q
-# 124 passed, 1 qdrant-client compatibility warning
+# 138 passed, 1 qdrant-client compatibility warning
 ```
 
 Environment uses SQLite in-memory, `INGESTION_USE_CELERY=false`, `STORAGE_BACKEND=local`, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`.

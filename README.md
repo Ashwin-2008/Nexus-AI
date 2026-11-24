@@ -10,7 +10,7 @@ NEXUS AI is a full-stack organizational knowledge platform:
 
 ## Quick start (local development, no Docker)
 
-These commands run the backend on SQLite with local file storage, an in-process vector index and deterministic (non-semantic) embeddings. This is the fastest way to try the product without PostgreSQL, Redis, Qdrant, MinIO or an LLM key.
+These commands run the backend on SQLite with local file storage, an in-process vector index and deterministic (non-semantic) embeddings. This is the fastest way to try the product without PostgreSQL, Redis, Qdrant, object storage or an LLM key.
 
 ### Prerequisites
 
@@ -130,12 +130,12 @@ Register the first user; the first registration also creates the organization an
 - `VECTOR_INDEX_BACKEND=memory` keeps vectors in process memory only; restarting the backend loses them.
 - `EMBEDDING_PROVIDER=hashing` produces deterministic, **non-semantic** vectors for machinery verification only.
 - Without an LLM key, chat/RAG answers use the labelled extractive fallback, never fabricated text.
-- Redis/Celery, Qdrant, MinIO and external connectors require their own services/credentials.
+- Redis/Celery, Qdrant, Supabase Storage and external connectors require their own services/credentials.
 - Delete `backend/nexus_dev_run.db` and repeat the database step to reset local data.
 
 ## Optional: run the complete stack with Docker Compose
 
-Requires Docker Desktop to be running and a root `.env` (copy `.env.example` and fill it in — the six required secrets are enforced by compose). Start from the repository root:
+Requires Docker Desktop to be running and a root `.env` (copy `.env.example` and fill it in). Start from the repository root:
 
 ```bash
 docker compose -f docker-compose.yml up -d --build
@@ -144,7 +144,53 @@ docker compose ps        # wait for the backend healthcheck to pass
 
 (Docker Compose auto-loads `docker-compose.override.yml`; pass `-f docker-compose.yml` in production to skip those debug-port overrides.)
 
+### Redis: Upstash (managed)
+
+Redis runs as Celery broker + result backend and feeds the health check. The local `redis` container is **disabled**; point the stack at Upstash with one variable in `.env`:
+
+```env
+# Upstash console → your database → Connect → "Redis (RESP)":
+REDIS_URL=rediss://default:<redis-password>@<your-db>.upstash.io:6379
+```
+
+- Use the **Redis (RESP)** endpoint — **not** the REST URL/token. This backend speaks the Redis wire protocol (redis-py, Celery); Upstash's REST API is a different protocol and will not work here.
+- The `rediss://` scheme (TLS) is required; the Celery app enables TLS automatically for it (`backend/app/worker/celery_app.py`).
+- On the Upstash free tier, watch the connection and command limits — the Celery worker keeps a persistent broker connection and periodic heartbeats.
+- `REDIS_PASSWORD` is only needed if you run a local redis container yourself.
+
+### Database: Supabase PostgreSQL (recommended) or local container
+
+The local `postgres` container is **disabled in production compose**. Point the stack at a managed database by setting one variable in `.env`:
+
+```env
+# Supabase → Connect → "Session pooler" string, driver switched to psycopg:
+DATABASE_URL=postgresql+psycopg://postgres.<project-ref>:<db-password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+- URL-encode special characters in the database password (`@` → `%40`, `#` → `%23`, …).
+- Use the **session pooler (port 5432)** string, not the transaction pooler (6543), so Alembic migrations and long-lived sessions behave predictably.
+- On first start the backend runs `alembic upgrade head` and creates every table in Supabase — verify in the Supabase Table Editor.
+- Qdrant still runs as a container locally; PostgreSQL and document storage move to Supabase.
+
+For quick local dev without Supabase, the override file starts a containerized postgres on port 5432 (set `POSTGRES_PASSWORD` in `.env`).
+
 Migrations run automatically in the backend container. Register the first user through the UI — the first registration creates the organization and the admin role.
+
+### Document storage: Supabase Storage (default)
+
+Uploaded documents, connector snapshots and generated reports live in a private Supabase Storage bucket; PostgreSQL keeps only metadata plus a `storage_path` key of the form `orgs/<org_id>/documents/<uuid>_<filename>`. In `.env`:
+
+```env
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>   # backend only — never ship to the browser
+SUPABASE_STORAGE_BUCKET=nexus-documents
+STORAGE_BACKEND=supabase
+```
+
+- Copy both values from Supabase → Project Settings → API. The service-role key bypasses row-level security, so it stays on the backend; clients always download through the authenticated API.
+- The bucket is created on first upload if it does not exist (keep it private).
+- `STORAGE_BACKEND=auto` (default) prefers Supabase, then MinIO, then local disk. Documents record the backend that stored them, so switching backends does not break existing files.
+- Self-hosted MinIO is still supported (`STORAGE_BACKEND=minio` + `MINIO_*`); the compose file no longer ships a MinIO container.
 
 ### Using Groq as the LLM provider
 
@@ -159,7 +205,35 @@ LLM_MODEL=llama-3.3-70b-versatile
 
 `docker-compose.yml` passes these to both `backend` and `worker`. Groq does **not** expose an embeddings endpoint, so keep `EMBEDDING_PROVIDER=hashing` (non-semantic) or run a dedicated embeddings provider separately — do not set it to `openai_compatible` while `OPENAI_BASE_URL` points at Groq.
 
-## Tests and checks
+## Production deployment (Supabase · Render · Vercel · Grafana Cloud)
+
+This is the supported production topology; the full walkthrough is in
+[`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
+
+| Layer | Service | Backend variables |
+|---|---|---|
+| Database | Supabase PostgreSQL | `DATABASE_URL` |
+| Document storage | Supabase Storage (private bucket) | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`, `STORAGE_BACKEND=supabase` |
+| API + Celery worker | Render (Docker) | `render.yaml` blueprint; secrets entered in the dashboard |
+| Frontend | Vercel | `VITE_API_BASE_URL=https://<api>.onrender.com/api/v1` |
+| Redis | Upstash | `REDIS_URL=rediss://…` |
+| Vector index | Qdrant Cloud | `QDRANT_URL`, `QDRANT_API_KEY` |
+| Monitoring | Grafana Cloud | Agentless scrape of `https://<api>.onrender.com/metrics` |
+
+```bash
+# one-time: create the Render services from the blueprint
+# (Dashboard → New → Blueprint → select this repository)
+
+# after deploy
+curl -s https://<api>.onrender.com/api/v1/health
+```
+
+Health reports `storage: healthy` only when the Supabase bucket is reachable;
+`/api/v1/system/capabilities` shows the resolved storage backend
+(`storage.backend`) rather than just the configured mode.
+
+`.env` at the repository root is the single source of truth for compose; on
+Render the same variables are set in the service environment instead.
 
 ```bash
 cd backend
