@@ -8,7 +8,8 @@ Updated by: RAG implementation pass; Supabase Storage + Render/Vercel deployment
 The modular RAG subsystem is implemented and wired through the existing backend. Upload, connectors, chat, specialists, supervisor executions and the main chat API all use the same retrieval/generation path in `backend/app/rag`. No second agent framework, vector database, embedding provider, or retrieval implementation was added.
 
 Validation in this environment (no live Docker/Postgres/Qdrant, no valid LLM/embedding API key):
-- Backend suite: **138 passed** (SQLite, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`, Celery disabled; 14 of these cover the Supabase Storage backend with a mocked HTTP transport).
+- Backend suite: **140 passed** (SQLite, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`, Celery disabled; 16 of these cover the Supabase Storage backend with a mocked HTTP transport).
+- Live checks against the owner's Supabase project and Qdrant Cloud: storage bucket auto-create, upload/download/delete and Qdrant collection create/upsert/search/delete all succeeded. PostgreSQL and Redis ports are blocked from this machine, so those were validated by URL parsing only.
 - Frontend: `npm run type-check`, `npm run lint` and `npm run build` passed after the 3D dual-theme redesign.
 - Alembic: single head `0014_rag_metadata`; migration **not applied to a live PostgreSQL instance** in this environment.
 - Live Qdrant, live LLM generation, real semantic embeddings, Supabase Storage/MinIO, Redis/Celery, and external connectors were **not live-verified**.

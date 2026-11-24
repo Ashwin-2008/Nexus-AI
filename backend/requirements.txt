@@ -1,4 +1,4 @@
-﻿fastapi>=0.115.0
+fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
 pydantic-settings>=2.4.0
@@ -14,7 +14,7 @@ httpx>=0.27.0
 redis>=5.0.0
 celery>=5.4.0
 minio>=7.2.0
-qdrant-client>=1.9.0,<1.10  # pinned to qdrant server v1.9.2 in docker-compose
+qdrant-client>=1.10,<2  # query_points API; works with Qdrant Cloud and the local qdrant container
 prometheus-client>=0.20.0
 slowapi>=0.1.9
 pypdf>=4.0.0

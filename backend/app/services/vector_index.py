@@ -218,14 +218,26 @@ class QdrantVectorIndex:
             if empty_scope is not None:
                 conditions.append(empty_scope)
             should_filters = conditions
+        query_filter = qmodels.Filter(must=must_filters, should=should_filters)
         try:
-            hits = self.client.search(
-                collection_name=self.collection,
-                query_vector=vector,
-                query_filter=qmodels.Filter(must=must_filters, should=should_filters),
-                limit=top_k,
-                with_payload=True,
-            )
+            if hasattr(self.client, "query_points"):
+                # qdrant-client >= 1.10 (search() was removed in 1.16).
+                response = self.client.query_points(
+                    collection_name=self.collection,
+                    query=vector,
+                    query_filter=query_filter,
+                    limit=top_k,
+                    with_payload=True,
+                )
+                hits = getattr(response, "points", response)
+            else:  # pragma: no cover - qdrant-client < 1.10
+                hits = self.client.search(
+                    collection_name=self.collection,
+                    query_vector=vector,
+                    query_filter=query_filter,
+                    limit=top_k,
+                    with_payload=True,
+                )
         except Exception as e:  # noqa: BLE001
             raise VectorIndexError(f"qdrant search failed: {e}") from e
         return [

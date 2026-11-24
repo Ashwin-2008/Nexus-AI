@@ -101,8 +101,14 @@ QDRANT_COLLECTION=nexus_chunks
 VECTOR_INDEX_BACKEND=qdrant
 ```
 
+Keep the `:6333` REST port on the cluster URL. If a network blocks outbound
+6333, Qdrant Cloud also answers REST on `:443` for the same cluster (verified),
+so `https://<cluster-id>.<region>.cloud.qdrant.io:443` is a valid fallback.
+
 Collection dimensions follow the configured embedding model; changing the
-model requires re-indexing (`POST /api/v1/rag/documents/{id}/reindex`).
+model requires re-indexing (`POST /api/v1/rag/documents/{id}/reindex`). The
+collection is created on first ingestion; an existing collection with a
+different vector size is rejected rather than silently mixed.
 
 ## 5. Render — API and worker
 
