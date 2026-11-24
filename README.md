@@ -135,13 +135,29 @@ Register the first user; the first registration also creates the organization an
 
 ## Optional: run the complete stack with Docker Compose
 
-Requires Docker Desktop to be running and a root `.env` configured for PostgreSQL, Redis, MinIO, Qdrant and a JWT secret. Start from the repository root:
+Requires Docker Desktop to be running and a root `.env` (copy `.env.example` and fill it in — the six required secrets are enforced by compose). Start from the repository root:
 
 ```bash
-docker compose up --build
+docker compose -f docker-compose.yml up -d --build
+docker compose ps        # wait for the backend healthcheck to pass
 ```
 
-Typical endpoints (depending on the ports in `.env`): backend `http://localhost:8000`, frontend per compose mapping, nginx `http://localhost:8080`.
+(Docker Compose auto-loads `docker-compose.override.yml`; pass `-f docker-compose.yml` in production to skip those debug-port overrides.)
+
+Migrations run automatically in the backend container. Register the first user through the UI — the first registration creates the organization and the admin role.
+
+### Using Groq as the LLM provider
+
+Groq serves an OpenAI-compatible chat API, so no backend code changes are needed. In `.env`:
+
+```env
+OPENAI_API_KEY=gsk_your_groq_key_here
+OPENAI_BASE_URL=https://api.groq.com/openai/v1
+LLM_PROVIDER=openai_compatible
+LLM_MODEL=llama-3.3-70b-versatile
+```
+
+`docker-compose.yml` passes these to both `backend` and `worker`. Groq does **not** expose an embeddings endpoint, so keep `EMBEDDING_PROVIDER=hashing` (non-semantic) or run a dedicated embeddings provider separately — do not set it to `openai_compatible` while `OPENAI_BASE_URL` points at Groq.
 
 ## Tests and checks
 

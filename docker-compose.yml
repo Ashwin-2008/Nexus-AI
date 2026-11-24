@@ -107,6 +107,10 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      # LLM provider (Groq is OpenAI-compatible: set OPENAI_BASE_URL to Groq)
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
       # Knowledge indexing (Release 0.2)
       # EMBEDDING_PROVIDER: openai_compatible|local|hashing — hashing = deterministic
       # non-semantic vectors for machinery verification; set local (requires
@@ -151,6 +155,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_BUCKET: ${MINIO_BUCKET:-nexus-documents}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-auto}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
       # Knowledge indexing (must match backend settings)
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-hashing}
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-256}
