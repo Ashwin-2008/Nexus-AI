@@ -1,6 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
+import threading
+import time
 import uuid
 
 from app.core.config import settings
@@ -11,10 +13,41 @@ from app.worker.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
+_worker_state = {"checked_at": 0.0, "available": False}
+_worker_state_lock = threading.Lock()
+_WORKER_CACHE_SECONDS = 15.0
+
+
+def celery_worker_available(timeout: float = 1.0, force: bool = False) -> bool:
+    """Return True only when a Celery worker is actually consuming the broker.
+
+    A reachable broker is not enough: tasks enqueued with no worker stay
+    'queued' forever. Callers use this probe to fall back to in-process
+    processing instead of leaving jobs silently stuck.
+    """
+    if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
+        return False
+    now = time.monotonic()
+    with _worker_state_lock:
+        if not force and (now - _worker_state["checked_at"]) < _WORKER_CACHE_SECONDS:
+            return bool(_worker_state["available"])
+    try:
+        replies = celery_app.control.ping(timeout=timeout) or []
+        available = bool(replies)
+    except Exception as e:  # noqa: BLE001 — broker/control failure means no usable worker
+        logger.warning("Celery worker probe failed: %s", e)
+        available = False
+    with _worker_state_lock:
+        _worker_state["checked_at"] = time.monotonic()
+        _worker_state["available"] = available
+    if not available:
+        logger.warning("No Celery worker responded; using in-process background processing")
+    return available
+
 
 def enqueue_connector_sync(db, source, job) -> str | None:
     """Enqueue a connector sync task if Celery is available; else None."""
-    if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
+    if not celery_worker_available():
         return None
     try:
         task = sync_connector_task.apply_async(
@@ -41,7 +74,7 @@ def enqueue_agent_execution(execution_id: str) -> str | None:
         return None
 def enqueue_document_ingestion(db, document: Document, job: IngestionJob | None = None) -> str | None:
     """Enqueue Celery task if available; return task id or None."""
-    if celery_app is None or not getattr(settings, "ingestion_use_celery", True):
+    if not celery_worker_available():
         return None
     try:
         task = process_document_task.apply_async(  # type: ignore[attr-defined]
@@ -116,20 +149,10 @@ if celery_app is not None:
 
     @celery_app.task(name="app.worker.tasks.sync_connector", bind=True, acks_late=True, max_retries=1)
     def sync_connector_task(self, source_id: str, job_id: str):  # type: ignore[no-redef]
-        SessionLocal = db_session.SessionLocal
-        db = SessionLocal()
-        try:
-            from app.models.connector import ConnectorSyncJob, DataSource
-            from app.services.connectors_service import sync_data_source
+        from app.services.connectors_service import run_sync_job_by_id
 
-            source = db.get(DataSource, uuid.UUID(source_id))
-            job = db.get(ConnectorSyncJob, uuid.UUID(job_id))
-            if source is None or job is None:
-                return {"status": "missing"}
-            result = sync_data_source(db, source, job)
-            return result
-        finally:
-            db.close()
+        run_sync_job_by_id(uuid.UUID(source_id), uuid.UUID(job_id))
+        return {"status": "finished"}
 
 else:
 

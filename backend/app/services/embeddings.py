@@ -56,8 +56,18 @@ class OpenAICompatibleEmbeddingProvider:
         timeout: float = 30.0,
         max_retries: int = 3,
     ) -> None:
-        self.base_url = (base_url or settings.openai_base_url or "https://api.openai.com/v1").rstrip("/")
-        self.api_key = api_key or settings.openai_api_key or ""
+        self.base_url = (
+            base_url
+            or getattr(settings, "embedding_base_url", "")
+            or settings.openai_base_url
+            or "https://api.openai.com/v1"
+        ).rstrip("/")
+        self.api_key = (
+            api_key
+            or getattr(settings, "embedding_api_key", "")
+            or settings.openai_api_key
+            or ""
+        )
         self.model = model or settings.embedding_model or DEFAULT_OPENAI_MODEL
         self.dimensions = dimensions or settings.embedding_dimensions or 1536
         self.timeout = timeout

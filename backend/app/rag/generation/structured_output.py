@@ -11,6 +11,11 @@ import re
 from dataclasses import dataclass, field
 
 _FENCE_RE = re.compile(r"^```(?:json|markdown)?\s*|\s*```$", re.IGNORECASE)
+# Some OpenAI-compatible providers occasionally decode a citation marker as
+# "?1?" instead of "[1]" (observed with Groq gpt-oss). Restore the marker so
+# citations resolve and verification can see them.
+_QMARK_CITATION_RE = re.compile(r"[?？](\d{1,2})[?？]")
+_CITATION_BRACKETS_RE = re.compile(r"[\[［【「]\s*(\d{1,2})\s*[\]］】」]")
 
 
 @dataclass
@@ -22,7 +27,9 @@ class ParsedAnswer:
 
 
 def parse_answer(raw: str) -> ParsedAnswer:
-    text = (raw or "").strip()
+    text = (raw or "").replace("\u202f", " ").replace("\u00a0", " ").strip()
+    text = _CITATION_BRACKETS_RE.sub(r"[\1]", text)
+    text = _QMARK_CITATION_RE.sub(r"[\1]", text)
     if not text:
         return ParsedAnswer(answer="", warnings=["model returned an empty answer"])
     candidate = _FENCE_RE.sub("", text).strip()

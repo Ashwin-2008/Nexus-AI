@@ -27,6 +27,21 @@ def _terms(text: str) -> set[str]:
     return {token.lower() for token in _TOKEN_RE.findall(text or "") if len(token) > 2}
 
 
+def query_coverage(query: str, text: str, extra: str = "") -> float:
+    """Fraction of meaningful query terms present in a passage.
+
+    Used only for non-semantic embedding providers: when vectors carry no
+    meaning, a passage that shares no terms with the question cannot be
+    relevant, and keeping it makes the answer look ungrounded.
+    """
+    wanted: set[str] = set()
+    for term in query_terms(query):
+        wanted |= stem_variants(term)
+    if not wanted:
+        return 0.0
+    return len(wanted & _terms(f"{text} {extra}")) / len(wanted)
+
+
 def rerank_heuristic(query: str, chunks: list[EvidenceChunk], top_k: int | None = None) -> list[EvidenceChunk]:
     if not chunks:
         return []

@@ -396,16 +396,18 @@ For a production-shaped run without the dev overrides, use
 
 ### Option C - real embeddings and generated answers
 
-Point the backend at a real embedding provider and an LLM (see
-[Configuration](#configuration)). Groq, OpenAI and local Ollama all work because the
-client speaks the OpenAI API:
+Point the backend at an LLM and a real embedding provider (see
+[Configuration](#configuration)). Groq serves chat but not embeddings, so use a
+separate OpenAI-compatible embeddings endpoint:
 
 ```ini
-OPENAI_API_KEY=<key>
+OPENAI_API_KEY=<chat-key>
 OPENAI_BASE_URL=https://api.groq.com/openai/v1   # or your own endpoint
-LLM_MODEL=llama-3.3-70b-versatile
+LLM_MODEL=openai/gpt-oss-120b
 EMBEDDING_PROVIDER=openai_compatible
-EMBEDDING_MODEL=<embedding model id>
+EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_API_KEY=<embeddings-key>
+EMBEDDING_MODEL=text-embedding-3-small
 EMBEDDING_DIMENSIONS=1536
 VECTOR_INDEX_BACKEND=qdrant
 QDRANT_URL=https://<cluster>.cloud.qdrant.io:6333

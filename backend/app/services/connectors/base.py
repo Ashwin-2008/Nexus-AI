@@ -640,24 +640,53 @@ class EmailConnector(BaseConnector):
         if not isinstance(folder, str) or not folder:
             raise ConnectorError("email.folder invalid")
 
-    def fetch(self, ctx: ConnectorContext, max_items: int = 200) -> Iterable[ConnectorItem]:
-        import email as email_lib
+    def _connect(self, ctx: ConnectorContext):
         import imaplib
 
         host = str(ctx.config["host"])
         port = int(ctx.config.get("port", 993))
+        use_ssl = bool(ctx.config.get("use_ssl", True))
+        timeout = float(ctx.config.get("timeout_seconds", 20) or 20)
+        try:
+            imap = (
+                imaplib.IMAP4_SSL(host, port, timeout=timeout)
+                if use_ssl
+                else imaplib.IMAP4(host, port, timeout=timeout)
+            )
+            login_result = imap.login(ctx.credentials["username"], ctx.credentials["password"])
+        except Exception as e:  # noqa: BLE001
+            raise ConnectorError(f"email: cannot connect/login to {host}:{port}: {e}") from e
+        if login_result[0] != "OK":
+            try:
+                imap.logout()
+            except Exception:  # noqa: BLE001
+                pass
+            raise ConnectorError(f"email: IMAP login failed: {login_result}")
+        return imap
+
+    def test_connection(self, ctx: ConnectorContext) -> dict[str, Any]:
+        """Actually authenticate and select the folder — not just validate fields."""
+        self.validate(ctx)
+        folder = str(ctx.config.get("folder", "INBOX"))
+        imap = self._connect(ctx)
+        try:
+            status, _ = imap.select(folder)
+            if status != "OK":
+                raise ConnectorError(f"email: cannot select folder {folder}")
+            return {"ok": True, "folder": folder}
+        finally:
+            try:
+                imap.logout()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def fetch(self, ctx: ConnectorContext, max_items: int = 200) -> Iterable[ConnectorItem]:
+        import email as email_lib
+
         folder = str(ctx.config.get("folder", "INBOX"))
         max_items = min(max_items, int(ctx.config.get("max_messages", 20)) or 20)
-        use_ssl = bool(ctx.config.get("use_ssl", True))
-
+        imap = self._connect(ctx)
         try:
-            imap = imaplib.IMAP4_SSL(host, port) if use_ssl else imaplib.IMAP4(host, port)
-        except Exception as e:  # noqa: BLE001
-            raise ConnectorError(f"email: cannot connect to {host}:{port}: {e}") from e
-        try:
-            login_result = imap.login(ctx.credentials["username"], ctx.credentials["password"])
-            if login_result[0] != "OK":
-                raise ConnectorError(f"email: IMAP login failed: {login_result}")
             status, _ = imap.select(folder)
             if status != "OK":
                 raise ConnectorError(f"email: cannot select folder {folder}")
@@ -707,8 +736,8 @@ class EmailConnector(BaseConnector):
                 imap.logout()
             except Exception:  # noqa: BLE001
                 pass
-        if not items:
-            raise ConnectorError("email: no readable messages found")
+        # An empty mailbox (or a mailbox with no text bodies) is a successful
+        # sync with zero items, not a failure.
         return items
 
 

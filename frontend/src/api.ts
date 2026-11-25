@@ -70,7 +70,7 @@ export interface DataSource {
 export interface SyncJob {
   id: string
   data_source_id: string
-  status: 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'waiting_for_approval'
+  status: 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'cancelled' | 'waiting_for_approval'
   fetched: number
   ingested: number
   skipped: number

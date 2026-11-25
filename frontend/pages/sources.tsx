@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Braces,
   CheckCircle2,
@@ -150,6 +150,12 @@ const CONNECTORS: Array<{
   },
 ]
 
+const SYNC_TERMINAL = new Set(['succeeded', 'partial', 'failed', 'cancelled'])
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
+}
+
 function parseJson(value: string, label: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(value)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -173,6 +179,20 @@ export default function KnowledgeSources() {
   const [creating, setCreating] = useState(false)
   const [showCreate, setShowCreate] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [syncingId, setSyncingId] = useState<string | null>(null)
+  const mountedRef = useRef(true)
+  const selectedIdRef = useRef<string | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    selectedIdRef.current = selected?.id ?? null
+  }, [selected])
 
   const [name, setName] = useState('')
   const [type, setType] = useState<ConnectorType>('website')
@@ -253,22 +273,46 @@ export default function KnowledgeSources() {
   }
 
   async function handleSync(source: DataSource) {
-    setBusyId(source.id)
+    if (syncingId) return
+    setSyncingId(source.id)
     setError(null)
     setMessage(null)
+    const describe = (job: SyncJob) =>
+      `${source.name}: ${job.status} · ${job.fetched} fetched · ${job.ingested} ingested · ${job.skipped} skipped · ${job.failed} failed`
     try {
-      const job = await syncSource(source.id)
-      setMessage(`${source.name}: ${job.status} · ${job.ingested} ingested · ${job.skipped} skipped · ${job.failed} failed`)
-      await refresh()
-      if (selected?.id === source.id) {
-        setSyncLoading(true)
-        setSyncs(await listSourceSyncs(source.id))
-        setSyncLoading(false)
+      let job = await syncSource(source.id)
+      setMessage(describe(job))
+      // The API returns as soon as the job is queued/scheduled. Poll until the
+      // job reaches a terminal state so counts never freeze at 0.
+      let polls = 0
+      while (mountedRef.current && !SYNC_TERMINAL.has(job.status) && polls < 240) {
+        await sleep(1500)
+        polls += 1
+        const jobs = await listSourceSyncs(source.id)
+        if (selectedIdRef.current === source.id) setSyncs(jobs)
+        const current = jobs.find((item) => item.id === job.id)
+        if (!current) break
+        job = current
+        if (polls % 4 === 0 || SYNC_TERMINAL.has(job.status)) setMessage(describe(job))
+        if (polls === 20 && job.status === 'queued') {
+          setMessage(`${source.name}: still queued — the sync has not started yet. If no Celery worker is deployed it will run in the API process.`)
+        }
       }
+      if (!mountedRef.current) return
+      if (!SYNC_TERMINAL.has(job.status)) {
+        setMessage(`${source.name}: ${job.status} — still running. Refresh later to see the final counts.`)
+      } else if (job.error) {
+        setMessage(describe(job))
+        setError(job.error)
+      } else {
+        setMessage(describe(job))
+      }
+      await refresh()
+      if (selectedIdRef.current === source.id) setSyncs(await listSourceSyncs(source.id))
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Sync failed')
+      if (mountedRef.current) setError(caught instanceof Error ? caught.message : 'Sync failed')
     } finally {
-      setBusyId(null)
+      if (mountedRef.current) setSyncingId(null)
     }
   }
 
@@ -363,7 +407,7 @@ export default function KnowledgeSources() {
                   <Button size="sm" variant="outline" onClick={() => void handleTest(source)} loading={busyId === source.id}>
                     Test
                   </Button>
-                  <Button size="sm" onClick={() => void handleSync(source)} loading={busyId === source.id} disabled={source.status === 'disabled'}>
+                  <Button size="sm" onClick={() => void handleSync(source)} loading={syncingId === source.id} disabled={source.status === 'disabled' || Boolean(syncingId)}>
                     <RefreshCw size={12} /> Sync
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => void handleSelect(source)}>
@@ -460,7 +504,14 @@ export default function KnowledgeSources() {
                     <tbody>
                       {syncs.map((job) => (
                         <tr key={job.id}>
-                          <td><StatusBadge status={job.status} /></td>
+                          <td>
+                            <StatusBadge status={job.status} />
+                            {job.error && (
+                              <div className="nx-xs" style={{ color: 'var(--nx-danger)', marginTop: 4, maxWidth: 220 }} title={job.error}>
+                                {job.error.slice(0, 100)}
+                              </div>
+                            )}
+                          </td>
                           <td>{job.fetched}</td>
                           <td>{job.ingested}</td>
                           <td>{job.skipped}</td>
@@ -480,7 +531,7 @@ export default function KnowledgeSources() {
               <Button variant="ghost" onClick={() => void handleDelete(selected)} style={{ color: 'var(--nx-danger)' }}><Trash2 size={13} /> Disconnect</Button>
               <div className="nx-row" style={{ gap: 8 }}>
                 <Button variant="outline" onClick={() => void handleTest(selected)} loading={busyId === selected.id}>Test connection</Button>
-                <Button onClick={() => void handleSync(selected)} loading={busyId === selected.id}><RefreshCw size={13} /> Sync now</Button>
+                <Button onClick={() => void handleSync(selected)} loading={syncingId === selected.id} disabled={Boolean(syncingId)}><RefreshCw size={13} /> Sync now</Button>
               </div>
             </div>
           </div>

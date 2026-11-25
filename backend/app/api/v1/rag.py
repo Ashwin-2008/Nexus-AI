@@ -387,6 +387,14 @@ def rag_status(
         .scalar()
         or 0
     )
+    config = RagConfig.from_settings()
+    provider = (config.embedding_provider or "").strip().lower()
+    semantic = provider not in {"hashing", "hash"}
+    embedding_warning = None if semantic else (
+        "EMBEDDING_PROVIDER=hashing stores non-semantic vectors. Retrieval is "
+        "keyword-only, so paraphrased questions may return no evidence. Configure "
+        "a real embeddings provider (and matching EMBEDDING_DIMENSIONS) for semantic search."
+    )
     return {
         "organization_id": str(current_user.organization_id),
         "documents": {
@@ -403,11 +411,23 @@ def rag_status(
             "out_of_sync": [item for item in sync if not item.get("in_sync")],
         },
         "pipeline_version": PIPELINE_VERSION,
+        "embedding": {
+            "provider": config.embedding_provider,
+            "model": config.embedding_model or "(provider default)",
+            "dimensions": config.embedding_dimensions or None,
+            "semantic": semantic,
+            "warning": embedding_warning,
+        },
         "capabilities": {
             "modes": ["hybrid", "dense", "sparse"],
-            "default_mode": RagConfig.from_settings().retrieval_mode,
-            "verification": RagConfig.from_settings().verification,
-            "reranker": RagConfig.from_settings().reranker,
+            "default_mode": config.retrieval_mode,
+            "effective_mode": (
+                "sparse"
+                if not semantic and config.retrieval_mode in {"hybrid", "dense"}
+                else config.retrieval_mode
+            ),
+            "verification": config.verification,
+            "reranker": config.reranker,
         },
     }
 

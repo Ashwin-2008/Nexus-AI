@@ -134,6 +134,7 @@ class RagOrchestrator:
         )
         timings.retrieval_ms = _ms(retrieval_started)
         timings.rerank_ms = int(result.timings.get("rerank_ms", 0))
+        session.warnings.extend(result.warnings)
         record_retrieval(result.mode, timings.retrieval_ms / 1000.0)
 
         evidence = list(result.evidence)
@@ -258,6 +259,7 @@ class RagOrchestrator:
                 analysis=analysis,
             )
             timings.retrieval_ms = _ms(retrieval_started)
+            session.warnings.extend(result.warnings)
             if not result.evidence:
                 response = self._no_evidence_response(analysis, result, request, timings, session, db)
                 yield {"event": "rag_end", "data": self._stream_payload(response)}

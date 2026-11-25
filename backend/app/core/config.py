@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     ingestion_max_retries: int = 3
     ingestion_retry_backoff_seconds: int = 30
     ingestion_use_celery: bool = True
+    # A queued/running connector sync older than this is treated as abandoned
+    # (e.g. the API restarted before its background task started).
+    connector_sync_stale_minutes: int = 60
+    # A queued job should start within seconds (Celery or API background task).
+    # Recover it quickly so a missed task cannot block retries for an hour.
+    connector_sync_queued_stale_minutes: int = 5
     agent_execution_timeout_seconds: int = 900
     agent_execution_recovery_seconds: int = 1800
     agent_max_retries: int = 3
@@ -91,11 +97,16 @@ class Settings(BaseSettings):
     rag_memory_max_turns: int = 4
 
     # Embeddings: provider = openai_compatible | local | hashing
-    # - openai_compatible: OpenAI-compatible /v1/embeddings endpoint (needs OPENAI_API_KEY)
+    # - openai_compatible: OpenAI-compatible /v1/embeddings endpoint.
+    #   EMBEDDING_BASE_URL/EMBEDDING_API_KEY allow a provider that is separate
+    #   from the chat endpoint (e.g. OpenAI embeddings + Groq chat); when empty
+    #   they fall back to OPENAI_BASE_URL/OPENAI_API_KEY.
     # - local: in-process sentence-transformers model (needs requirements-embeddings.txt)
     # - hashing: deterministic non-semantic vectors; CI/test machinery only
     embedding_provider: str = "hashing"
     embedding_model: str = ""
+    embedding_base_url: str = ""
+    embedding_api_key: str = ""
     embedding_local_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     embedding_dimensions: int = 0  # 0 = provider default
     embedding_batch_size: int = 64

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -24,7 +24,11 @@ from app.services.connectors import (
     get_connector,
     parse_config,
 )
-from app.services.connectors_service import sync_data_source
+from app.services.connectors_service import (
+    active_sync_job,
+    reap_stale_sync_jobs,
+    run_sync_job_by_id,
+)
 from app.services.credentials import (
     CredentialError,
     decrypt_credentials,
@@ -123,19 +127,6 @@ def _job_to_read(job: ConnectorSyncJob) -> SyncJobRead:
         finished_at=job.finished_at,
     )
 
-
-def _run_sync_background(source_id: uuid.UUID) -> None:
-    from app.db import session as db_session
-
-    db = db_session.SessionLocal()
-    try:
-        try:
-            sync_data_source(db, db.get(DataSource, source_id), _new_job(db, source_id))
-        except Exception as e:  # noqa: BLE001
-            db.rollback()
-            raise RuntimeError(f"connector sync crashed: {e}") from e
-    finally:
-        db.close()
 
 
 def _new_job(db: Session, source: DataSource) -> ConnectorSyncJob:
@@ -244,17 +235,16 @@ def delete_source(
     current_user: User = Depends(get_current_user),
 ):
     source = _get_owned_source(db, source_id, current_user)
-    # Propagate deletion to connector-created documents (org-scoped, deterministic filename prefix)
+    # Delete exactly the documents this source created. A filename prefix is
+    # not safe: two sources of the same type can share an external id.
     from app.models.document import Document
-    from app.services.connectors_service import build_connector_filename
     from app.services.vector_index import get_vector_index
 
-    prefix = f"connector/{source.type}/"
     docs = (
         db.query(Document)
         .filter(
             Document.organization_id == current_user.organization_id,
-            Document.filename.like(prefix + "%"),
+            Document.source_id == source.id,
         )
         .all()
     )
@@ -262,7 +252,7 @@ def delete_source(
         index = get_vector_index()
         for doc in docs:
             try:
-                index.delete_document(doc.id, current_user.organization_id)
+                index.delete_document(str(current_user.organization_id), str(doc.id))
             except Exception:  # noqa: BLE001 — vector cleanup best-effort, rows still removed
                 pass
         for doc in docs:
@@ -306,26 +296,32 @@ def decrypt_credentials_safe(token: str | None) -> dict:
 @router.post("/{source_id}/sync", response_model=SyncJobRead, status_code=202)
 def trigger_sync(
     source_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     source = _get_owned_source(db, source_id, current_user)
     if source.status == "disabled":
         raise HTTPException(status_code=409, detail={"code": "disabled", "message": "Data source is disabled"})
+
+    # Recover jobs abandoned by an earlier API restart before deciding whether
+    # this click is a duplicate of a genuinely running sync.
+    reap_stale_sync_jobs(db, source)
+    existing = active_sync_job(db, source.id)
+    if existing is not None:
+        return _job_to_read(existing)
+
     job = _new_job(db, source)
-    # Production path: Celery worker. Fallback (celery unavailable): execute the
-    # sync synchronously in-request so the returned job reflects the outcome.
+    # Prefer a real Celery worker. If none is consuming the queue, run the sync
+    # as an in-process background task so the job never sits queued forever.
     from app.worker.tasks import enqueue_connector_sync
 
-    task_id = enqueue_connector_sync(db, source, job)
+    try:
+        task_id = enqueue_connector_sync(db, source, job)
+    except Exception:  # noqa: BLE001 — queue probing must never fail the request
+        task_id = None
     if not task_id:
-        try:
-            sync_data_source(db, source, job)
-        except Exception as e:  # noqa: BLE001 — sync_data_source records failure states itself
-            db.rollback()
-            job.status = "failed"
-            job.error = str(e)[:500]
-            db.commit()
+        background_tasks.add_task(run_sync_job_by_id, source.id, job.id)
     db.refresh(job)
     return _job_to_read(job)
 
@@ -337,6 +333,7 @@ def list_syncs(
     current_user: User = Depends(get_current_user),
 ):
     source = _get_owned_source(db, source_id, current_user)
+    reap_stale_sync_jobs(db, source)
     rows = (
         db.query(ConnectorSyncJob)
         .filter(ConnectorSyncJob.data_source_id == source.id)

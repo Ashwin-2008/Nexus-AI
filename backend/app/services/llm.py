@@ -57,11 +57,59 @@ class LLMProvider:
         self.model = model or settings.llm_model or "gpt-4o-mini"
         self.timeout = 60.0
         self.max_retries = 2
+        self._model_discovered = False
         if not self.api_key:
             raise LLMError(
                 "LLM provider openai_compatible selected but no API key configured "
                 "(set OPENAI_API_KEY and optionally OPENAI_BASE_URL)."
             )
+
+    def _fallback_model(self) -> str | None:
+        """Pick a model the endpoint actually serves when the configured one is gone.
+
+        Hosted providers retire model ids (Groq removed llama-3.3 in 2025), and a
+        stale LLM_MODEL would otherwise turn every answer into the extractive
+        fallback with no obvious cause. Discover once, then reuse the choice.
+        """
+        if self._model_discovered:
+            return None
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                logger.warning("LLM model discovery failed: HTTP %s", resp.status_code)
+                return None
+            ids = [str(item.get("id")) for item in (resp.json().get("data") or []) if item.get("id")]
+        except Exception as exc:  # noqa: BLE001 — discovery must never mask the real error
+            logger.warning("LLM model discovery failed: %s", exc)
+            return None
+
+        preferred = (
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "qwen/qwen3.8-27b",
+            "llama-3.3-70b-versatile",
+            "gpt-4o-mini",
+        )
+        skipped = ("whisper", "guard", "orpheus", "embed", "tts", "moderation", "safeguard")
+        choices = [name for name in preferred if name in ids]
+        choices += [
+            name for name in ids
+            if name not in choices and not any(word in name.lower() for word in skipped)
+        ]
+        if not choices:
+            self._model_discovered = True
+            return None
+        self._model_discovered = True
+        previous, self.model = self.model, choices[0]
+        logger.warning(
+            "LLM model '%s' is not available at %s; using '%s' instead",
+            previous, self.base_url, self.model,
+        )
+        return self.model
 
     def stream_chat(self, messages: list[ChatMessageData], temperature: float = 0.2, max_tokens: int = 1024) -> Iterator[dict[str, Any]]:
         """Yield events: {'type':'token','text':...} and {'type':'usage',...}."""
@@ -76,41 +124,46 @@ class LLMProvider:
             "stream_options": {"include_usage": True},
         }
         started = time.monotonic()
-        try:
-            with httpx.stream("POST", url, headers=headers, json=payload, timeout=self.timeout) as resp:
-                if resp.status_code != 200:
-                    body = resp.read().decode("utf-8", errors="ignore")
-                    raise LLMError(f"LLM API HTTP {resp.status_code}: {body[:300]}")
-                usage: dict[str, Any] | None = None
-                for line in resp.iter_lines():
-                    if not line or not line.startswith("data:"):
+        for attempt in range(2):
+            try:
+                with httpx.stream("POST", url, headers=headers, json=payload, timeout=self.timeout) as resp:
+                    if resp.status_code == 404 and attempt == 0 and self._fallback_model():
+                        payload["model"] = self.model
                         continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choices = chunk.get("choices") or []
-                    if choices:
-                        delta = choices[0].get("delta") or {}
-                        text = delta.get("content")
-                        if text:
-                            yield {"type": "token", "text": text}
-                    if chunk.get("usage"):
-                        usage = chunk["usage"]
-                yield {
-                    "type": "done",
-                    "model": self.model,
-                    "latency_ms": int((time.monotonic() - started) * 1000),
-                    "prompt_tokens": usage.get("prompt_tokens") if usage else None,
-                    "completion_tokens": usage.get("completion_tokens") if usage else None,
-                }
-        except LLMError:
-            raise
-        except Exception as e:  # noqa: BLE001 — transport/protocol failures classified as LLMError
-            raise LLMError(f"LLM streaming request failed: {e}") from e
+                    if resp.status_code != 200:
+                        body = resp.read().decode("utf-8", errors="ignore")
+                        raise LLMError(f"LLM API HTTP {resp.status_code}: {body[:300]}")
+                    usage: dict[str, Any] | None = None
+                    for line in resp.iter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        choices = chunk.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            text = delta.get("content")
+                            if text:
+                                yield {"type": "token", "text": text}
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+                    yield {
+                        "type": "done",
+                        "model": self.model,
+                        "latency_ms": int((time.monotonic() - started) * 1000),
+                        "prompt_tokens": usage.get("prompt_tokens") if usage else None,
+                        "completion_tokens": usage.get("completion_tokens") if usage else None,
+                    }
+                    return
+            except LLMError:
+                raise
+            except Exception as e:  # noqa: BLE001 — transport/protocol failures classified as LLMError
+                raise LLMError(f"LLM streaming request failed: {e}") from e
 
     def chat(self, messages: list[ChatMessageData], temperature: float = 0.2, max_tokens: int = 1024) -> GenerationResult:
         url = f"{self.base_url}/chat/completions"
@@ -126,6 +179,9 @@ class LLMProvider:
         for attempt in range(1, self.max_retries + 1):
             try:
                 resp = httpx.post(url, headers=headers, json=payload, timeout=self.timeout)
+                if resp.status_code == 404 and attempt == 1 and self._fallback_model():
+                    payload["model"] = self.model
+                    resp = httpx.post(url, headers=headers, json=payload, timeout=self.timeout)
                 if resp.status_code in (429, 500, 502, 503, 504):
                     raise LLMError(f"LLM API transient HTTP {resp.status_code}")
                 resp.raise_for_status()

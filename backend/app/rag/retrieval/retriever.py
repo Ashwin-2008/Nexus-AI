@@ -8,6 +8,7 @@ per stage and cannot be bypassed by a specialist agent.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
@@ -67,6 +68,17 @@ class Retriever:
             warnings.append(f"unknown retrieval mode '{mode}', using hybrid")
             mode = "hybrid"
 
+        # Hashing vectors encode no meaning: a dense leg would add near-random
+        # neighbours and drown the lexical matches in RRF. Use BM25 alone and
+        # say so, rather than returning irrelevant context.
+        non_semantic = (self.config.embedding_provider or "").strip().lower() in {"hashing", "hash"}
+        if non_semantic and mode in {"hybrid", "dense"}:
+            warnings.append(
+                "keyword-only retrieval: EMBEDDING_PROVIDER=hashing is not semantic; "
+                "configure a real embeddings provider for paraphrase search"
+            )
+            mode = "sparse"
+
         effective, deny_all, filter_warnings = effective_filters(db, scope, filters)
         warnings.extend(filter_warnings)
         if deny_all:
@@ -87,6 +99,45 @@ class Retriever:
         leg_started = time.monotonic()
         candidates = self._retrieve_queries(db, scope, queries, effective, mode, warnings)
         timings = {"retrieval_ms": _ms(leg_started)}
+
+        coverage_query = query
+        query_expanded = False
+        if (
+            non_semantic
+            and mode == "sparse"
+            and analysis.intent not in {"summarize", "report", "conversational"}
+        ):
+            from app.rag.reranking.scoring import query_coverage
+
+            best = max(
+                (
+                    query_coverage(
+                        query,
+                        item.text,
+                        f"{item.document_filename} {item.section_heading or ''}",
+                    )
+                    for item in candidates
+                ),
+                default=0.0,
+            )
+            if best < 0.25:
+                extra_query = self._expand_query(query)
+                if extra_query:
+                    extra = self._retrieve_queries(
+                        db, scope, [extra_query], effective, mode, warnings
+                    )
+                    merged = {item.chunk_id or item.citation_key: item for item in candidates}
+                    for item in extra:
+                        key = item.chunk_id or item.citation_key
+                        current = merged.get(key)
+                        if current is None or item.score > current.score:
+                            merged[key] = item
+                    candidates = list(merged.values())
+                    queries = [*queries, extra_query]
+                    query_expanded = True
+                    # The expansion is document-like; scoring the original
+                    # question as well would dilute every long expansion.
+                    coverage_query = extra_query
 
         candidates, filtered_count = revalidate_evidence(db, scope, effective, candidates)
         candidates = _dedupe(candidates)
@@ -112,6 +163,50 @@ class Retriever:
             candidates, filtered_after = revalidate_evidence(db, scope, effective, candidates)
             filtered_count += filtered_after
 
+        if non_semantic and candidates and analysis.intent not in {"summarize", "report", "conversational"}:
+            from app.rag.reranking.scoring import query_coverage
+
+            scored = [
+                (
+                    item,
+                    query_coverage(
+                        coverage_query,
+                        item.text,
+                        f"{item.document_filename} {item.section_heading or ''}",
+                    ),
+                )
+                for item in candidates
+            ]
+            best = max((value for _item, value in scored), default=0.0)
+            if query_expanded:
+                # Expansion keywords are diverse, so fractional coverage is
+                # low by construction; keep every passage that matched any of
+                # them and let the LLM discard the rest.
+                kept = [item for item, value in scored if value > 0]
+                if kept:
+                    candidates = kept
+            elif best <= 0:
+                from app.rag.generation.provider import llm_configured
+
+                if llm_configured() and candidates:
+                    # Nothing overlaps lexically, but a real LLM can still use
+                    # these passages (they were ranked by BM25). Dropping them
+                    # would turn a paraphrase into a false "no evidence".
+                    warnings.append(
+                        "no retrieved chunk shares a term with the question; "
+                        "passing the best keyword-ranked passages to the LLM"
+                    )
+                else:
+                    warnings.append(
+                        "no retrieved chunk shares a term with the question; "
+                        "semantic search needs a real embeddings provider"
+                    )
+                    candidates = []
+            else:
+                threshold = max(0.25, best * 0.5)
+                kept = [item for item, value in scored if value >= threshold]
+                candidates = kept
+
         expanded = expand_parents(db, scope, candidates)
         attach_neighbour_context(db, scope, candidates, window=0)
         final_limit = int(top_k or self.config.final_top_k)
@@ -133,6 +228,47 @@ class Retriever:
         )
 
     # -- internals -----------------------------------------------------------
+
+    def _expand_query(self, query: str) -> str:
+        """Turn a paraphrase into document-like keywords with the configured LLM.
+
+        Only used for non-semantic embeddings, where BM25 is the sole retriever:
+        a question that shares no terms with the source otherwise returns no
+        evidence even though the answer is present. Failure is non-fatal.
+        """
+        if not self.config.query_rewrite:
+            return ""
+        try:
+            from app.rag.generation.provider import chat, llm_configured
+
+            if not llm_configured():
+                return ""
+            result = chat(
+                [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You rewrite a question into a short keyword search query for an "
+                            "enterprise document index. Output only keywords or synonyms likely "
+                            "to appear in the answer, 6 to 15 words, one line, no quotes, no "
+                            "explanation."
+                        ),
+                    },
+                    {"role": "user", "content": query},
+                ],
+                temperature=0.0,
+                # gpt-oss spends part of the budget on reasoning before it
+                # emits the keyword line; 300 tokens can leave the answer empty.
+                max_tokens=600,
+            )
+            line = " ".join((result.text or "").split())
+            line = re.sub(r"^[\"'`]+|[\"'`]+$", "", line).strip()
+            if not line or len(line) > 240:
+                return ""
+            return line
+        except Exception as exc:  # noqa: BLE001 — expansion is best-effort
+            logger.warning("lexical query expansion failed: %s", exc)
+            return ""
 
     def _retrieve_queries(
         self,

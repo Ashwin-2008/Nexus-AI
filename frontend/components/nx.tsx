@@ -34,7 +34,7 @@ export function StatusBadge({ status }: { status?: string | null }) {
       ? 'success'
       : /fail|error|reject|cancel|delete|unhealthy|critical/.test(value)
         ? 'danger'
-        : /pending|queue|process|run|warn|degraded|review|wait/.test(value)
+        : /pending|queue|process|run|warn|degraded|review|wait|partial/.test(value)
           ? 'warning'
           : 'default'
   return (

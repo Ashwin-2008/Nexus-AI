@@ -124,8 +124,10 @@ connector credentials stored in PostgreSQL are encrypted with it.
 | `nexus-worker` | Worker | `backend/Dockerfile.worker` | Celery queues `ingestion,agents,default` |
 
 Background workers are a **paid** Render plan feature; the free plan only runs
-web services. If the worker cannot run, set `INGESTION_USE_CELERY=false` so
-ingestion executes in the API process (documented, synchronous fallback).
+web services. The API probes the Celery control channel before enqueueing: when
+no worker answers, connector syncs and document ingestion run in the API process
+instead of sitting at `queued`/`0 ingested` forever. You can also set
+`INGESTION_USE_CELERY=false` to force the in-process path.
 
 Add a **Pre-Deploy Command** of `alembic upgrade head` if you deploy more than
 one API instance, so migrations run once instead of per instance.
@@ -158,9 +160,32 @@ CORS_ORIGINS=https://<your-app>.vercel.app
 OPENAI_API_KEY=<key>
 OPENAI_BASE_URL=https://api.groq.com/openai/v1
 LLM_PROVIDER=openai_compatible
-LLM_MODEL=llama-3.3-70b-versatile
+LLM_MODEL=openai/gpt-oss-120b
 EMBEDDING_PROVIDER=hashing   # or a real embeddings provider
 ```
+
+`EMBEDDING_PROVIDER=hashing` is deterministic but **not semantic**: retrieval is
+keyword-only and paraphrased questions can return no evidence. The API reports
+this in `/api/v1/rag/status` and in query warnings. Configure a real embeddings
+provider with matching `EMBEDDING_DIMENSIONS`, then reindex the documents.
+
+Groq serves chat but **not** embeddings, so a separate embedding endpoint is
+supported (it defaults to `OPENAI_BASE_URL` only when left empty):
+
+```env
+EMBEDDING_PROVIDER=openai_compatible
+EMBEDDING_BASE_URL=https://api.openai.com/v1
+EMBEDDING_API_KEY=<embeddings-provider-key>
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+```
+
+Changing dimensions changes the vector size: use a new `QDRANT_COLLECTION`
+name (or recreate the collection), then reindex. Existing 256-dimension hashing
+vectors cannot be mixed with 1536-dimension embeddings.
+
+`LLM_MODEL` is validated against the provider's `/models` endpoint on the first
+404: a retired model is replaced automatically, with a warning in the API log.
 
 The worker receives the same database, storage, Redis, Qdrant, LLM and embedding
 variables through `fromGroup: nexus-shared`, plus `WORKER_CONCURRENCY=2`.
