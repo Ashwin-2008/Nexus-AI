@@ -40,7 +40,7 @@ def match_claim(claim: str, evidence: list[EvidenceChunk]) -> EvidenceMatch:
     evidence_words: set[str] = set()
     for word in re.findall(r"[A-Za-zÀ-ÿ0-9']+", combined.lower()):
         if len(word) > 2:
-            evidence_words.add(word)
+            evidence_words |= stem_variants(word)
     coverage = len(wanted & evidence_words) / len(wanted) if wanted else 0.0
 
     phrase = re.sub(r"\s+", " ", claim.strip().lower())
@@ -55,8 +55,22 @@ def match_claim(claim: str, evidence: list[EvidenceChunk]) -> EvidenceMatch:
     unsupported_numbers = sorted(claim_numbers - evidence_numbers)
 
     claim_negated = bool(_NEGATION_RE.search(claim))
-    evidence_negated = bool(_NEGATION_RE.search(combined))
-    negation_mismatch = bool(claim_negated != evidence_negated and (claim_numbers or wanted))
+    # Compare polarity against the sentences that actually discuss the claim,
+    # not the whole cited bundle. A negated sentence elsewhere in a long
+    # passage must not turn a supported claim into a mismatch.
+    relevant_sentences = [
+        sentence
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", combined)
+        if _sentence_overlap(sentence, wanted) >= 0.5
+    ]
+    if claim_negated:
+        negation_mismatch = bool(relevant_sentences) and not any(
+            _NEGATION_RE.search(sentence) for sentence in relevant_sentences
+        )
+    else:
+        negation_mismatch = bool(relevant_sentences) and not any(
+            not _NEGATION_RE.search(sentence) for sentence in relevant_sentences
+        )
 
     # Conflicting polarity or mutually exclusive numbers about the same terms.
     contradictory = _contradictory_polarity(claim, evidence) or _numeric_conflict(claim, evidence)
@@ -87,6 +101,16 @@ def match_claim(claim: str, evidence: list[EvidenceChunk]) -> EvidenceMatch:
     )
 
 
+def _sentence_overlap(sentence: str, wanted: set[str]) -> float:
+    if not wanted:
+        return 0.0
+    words: set[str] = set()
+    for word in re.findall(r"[A-Za-zÀ-ÿ0-9']+", sentence.lower()):
+        if len(word) > 2:
+            words |= stem_variants(word)
+    return len(wanted & words) / len(wanted)
+
+
 def _numeric_conflict(claim: str, evidence: list[EvidenceChunk]) -> bool:
     """Flag claims whose numbers are all absent from otherwise matching evidence.
 
@@ -112,18 +136,12 @@ def _numeric_conflict(claim: str, evidence: list[EvidenceChunk]) -> bool:
 
 
 def _contradictory_polarity(claim: str, evidence: list[EvidenceChunk]) -> bool:
-    terms = set(query_terms(claim))
-    if not terms:
-        return False
-    supportive = False
-    negated = False
-    for item in evidence:
-        for sentence in re.split(r"(?<=[.!?])\s+|\n+", item.text or ""):
-            words = set(re.findall(r"[A-Za-zÀ-ÿ0-9']+", sentence.lower()))
-            if len(terms & words) / max(1, len(terms)) < 0.6:
-                continue
-            if _NEGATION_RE.search(sentence):
-                negated = True
-            else:
-                supportive = True
-    return supportive and negated
+    """Return True only for an explicit opposite statement about the claim.
+
+    The previous version fired whenever a cited bundle contained one negative
+    sentence and one positive sentence, even when they were about different
+    subjects. That produced false "conflicting evidence" verdicts. Polarity is
+    already checked sentence-by-sentence in ``match_claim``; numeric conflicts
+    are checked separately. Ambiguous cases go to the optional LLM auditor.
+    """
+    return False

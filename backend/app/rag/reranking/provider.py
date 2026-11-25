@@ -24,20 +24,30 @@ def get_reranker(method: str | None = None, config: RagConfig | None = None) -> 
     if name == "cross_encoder":
         return CrossEncoderReranker()
     if name == "auto":
-        # `auto` deliberately means the deterministic fallback, not a hidden
-        # network call or a first-use model download.
+        # Prefer a meaning-based LLM pass when a chat model is configured;
+        # otherwise use the deterministic fallback. The retriever degrades
+        # gracefully if the LLM call fails.
+        from app.rag.generation.provider import llm_configured
+
+        if llm_configured():
+            return LLMReranker()
         return HeuristicReranker()
     return HeuristicReranker()
 
 
 def reranker_metadata(config: RagConfig | None = None) -> dict:
     config = config or RagConfig.from_settings()
-    name = (config.reranker or "heuristic").lower()
+    name = (config.reranker or "auto").lower()
+    effective = name
+    if name == "auto":
+        from app.rag.generation.provider import llm_configured
+
+        effective = "llm" if llm_configured() else "heuristic"
     return {
         "configured": name,
-        "effective": "heuristic" if name == "auto" else name,
+        "effective": effective,
         "methods": list(RERANKER_METHODS),
-        "note": "heuristic is a deterministic fallback, not a trained cross-encoder"
-        if name in ("auto", "heuristic")
-        else None,
+        "note": "auto uses a meaning-based LLM pass when a chat model is configured; otherwise a deterministic fallback"
+        if name == "auto"
+        else ("heuristic is a deterministic fallback, not a trained cross-encoder" if name == "heuristic" else None),
     }

@@ -1,4 +1,4 @@
-﻿"""Document processing pipeline: extraction, normalization, chunking.
+"""Document processing pipeline: extraction, normalization, chunking.
 
 Real content extraction per file type (PDF/DOCX/TXT/Markdown/CSV/XLSX/PPTX/
 HTML/JSON/EML) with page/row/slide provenance, plus configurable chunking with
@@ -15,6 +15,8 @@ import uuid
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,29 @@ class ExtractionError(ValueError):
     """Raised when a file cannot be parsed at all (malformed, corrupt, empty)."""
 
 
+def _ocr_blobs(blobs: list[bytes], label: str, limit: int = 12) -> tuple[list[str], list[str]]:
+    """OCR embedded images for formats that also contain normal text."""
+    warnings: list[str] = []
+    if not blobs or not settings.ocr_enabled:
+        return [], warnings
+    from app.rag.parsing.ocr import get_ocr_engine
+
+    engine = get_ocr_engine()
+    if not engine.available():
+        warnings.append("OCR unavailable: embedded images were skipped (install Tesseract)")
+        return [], warnings
+    recovered: list[str] = []
+    for index, blob in enumerate(blobs[:limit], start=1):
+        try:
+            text = engine.extract_text(blob)
+        except Exception as exc:  # noqa: BLE001
+            warnings.append(f"{label} image {index} OCR failed: {exc}")
+            continue
+        if text.strip():
+            recovered.append(text.strip())
+    return recovered, warnings
+
+
 class FileExtractor:
     """Content-type aware text extraction with provenance spans."""
 
@@ -62,6 +87,12 @@ class FileExtractor:
             ".htm": self._extract_html,
             ".json": self._extract_json,
             ".eml": self._extract_email,
+            ".png": self._extract_image,
+            ".jpg": self._extract_image,
+            ".jpeg": self._extract_image,
+            ".webp": self._extract_image,
+            ".tif": self._extract_image,
+            ".tiff": self._extract_image,
         }.get(ext)
         if extractor is None:
             raise ExtractionError(f"Unsupported file type: {ext or 'unknown'}")
@@ -81,6 +112,31 @@ class FileExtractor:
             spans=[{"kind": "file", "start": 0, "end": len(text)}] if text else [],
         )
 
+    def _extract_image(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
+        from app.rag.parsing.ocr import get_ocr_engine
+
+        engine = get_ocr_engine()
+        if not engine.available():
+            raise ExtractionError(
+                "Image OCR is unavailable. Install Tesseract OCR on the worker "
+                "(or set OCR_TESSERACT_CMD) and retry."
+            )
+        try:
+            text = engine.extract_text(data)
+        except Exception as exc:  # noqa: BLE001
+            raise ExtractionError(f"Image OCR failed: {exc}") from exc
+        if not text.strip():
+            raise ExtractionError("OCR found no readable text in the image")
+        return ExtractedContent(
+            text=text,
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "ocr_engine": engine.name,
+            },
+            spans=[{"kind": "image", "start": 0, "end": len(text)}],
+        )
+
     def _extract_pdf(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
         from pypdf import PdfReader
 
@@ -97,12 +153,40 @@ class FileExtractor:
         spans: list[dict[str, Any]] = []
         warnings: list[str] = []
         empty_pages = 0
+        ocr_pages = 0
+        ocr_engine = None
+        if settings.ocr_enabled:
+            from app.rag.parsing.ocr import get_ocr_engine
+
+            candidate = get_ocr_engine()
+            ocr_engine = candidate if candidate.available() else None
         for i, page in enumerate(reader.pages, start=1):
             try:
                 page_text = page.extract_text() or ""
             except Exception as e:  # noqa: BLE001
                 warnings.append(f"page {i} extraction failed: {e}")
                 page_text = ""
+            ocr_text = ""
+            if (
+                ocr_engine is not None
+                and len(page_text.strip()) < max(1, settings.ocr_min_text_chars)
+                and ocr_pages < max(1, settings.ocr_max_pages)
+            ):
+                scanned: list[str] = []
+                try:
+                    images = list(page.images)
+                except Exception as exc:  # noqa: BLE001
+                    warnings.append(f"page {i} image extraction failed: {exc}")
+                    images = []
+                for image in images[:4]:
+                    try:
+                        scanned.append(ocr_engine.extract_text(image.data))
+                    except Exception as exc:  # noqa: BLE001
+                        warnings.append(f"page {i} OCR failed: {exc}")
+                ocr_text = "\n".join(part.strip() for part in scanned if part.strip())
+                if ocr_text:
+                    ocr_pages += 1
+                    page_text = (page_text + "\n" + ocr_text).strip()
             if not page_text.strip():
                 empty_pages += 1
             start = sum(len(p) for p in parts)
@@ -111,15 +195,27 @@ class FileExtractor:
             spans.append({"kind": "page", "number": i, "start": start, "end": start + len(page_text)})
         text = "".join(parts).strip()
         if not text:
-            raise ExtractionError(
-                "No extractable text in PDF (scanned/image-only content requires OCR, "
-                "which is not enabled)"
-            )
+            if ocr_engine is None:
+                detail = (
+                    " OCR is enabled but Tesseract is unavailable (install it or set OCR_TESSERACT_CMD)"
+                    if settings.ocr_enabled
+                    else " OCR is disabled (set OCR_ENABLED=true to read scans)"
+                )
+            else:
+                detail = " OCR found no readable text in the embedded page images"
+            raise ExtractionError(f"No extractable text in PDF;{detail}")
         if empty_pages:
             warnings.append(f"{empty_pages} of {len(reader.pages)} pages had no extractable text")
+        if ocr_pages:
+            warnings.append(f"OCR recovered text from {ocr_pages} page(s)")
         return ExtractedContent(
             text=text,
-            metadata={"filename": ctx.filename, "content_type": ctx.content_type, "page_count": len(reader.pages)},
+            metadata={
+                "filename": ctx.filename,
+                "content_type": ctx.content_type,
+                "page_count": len(reader.pages),
+                "ocr_pages": ocr_pages,
+            },
             spans=spans,
             warnings=warnings,
         )
@@ -150,6 +246,20 @@ class FileExtractor:
                 parts.append("\n")
                 spans.append({"kind": "table_row", "table": t_idx, "row": r_idx, "start": start, "end": start + len(line)})
                 table_rows.append(line)
+        image_warnings: list[str] = []
+        image_blobs: list[bytes] = []
+        try:
+            for part in d.part.package.iter_parts():
+                if getattr(part, "content_type", "").startswith("image/") and hasattr(part, "blob"):
+                    image_blobs.append(part.blob)
+        except Exception as exc:  # noqa: BLE001
+            image_warnings.append(f"DOCX image enumeration failed: {exc}")
+        recovered, ocr_warnings = _ocr_blobs(image_blobs, "DOCX")
+        ocr_warnings = image_warnings + ocr_warnings
+        if recovered:
+            parts.append("\n[Image text]\n")
+            parts.extend(recovered)
+            parts.append("\n")
         text = "".join(parts).strip()
         if not text:
             raise ExtractionError("DOCX contains no extractable text")
@@ -160,8 +270,10 @@ class FileExtractor:
                 "content_type": ctx.content_type,
                 "paragraph_count": len(d.paragraphs),
                 "table_count": len(d.tables),
+                "ocr_images": len(recovered),
             },
             spans=spans,
+            warnings=ocr_warnings,
         )
 
     def _extract_csv(self, data: bytes, ctx: ProcessingContext) -> ExtractedContent:
@@ -388,6 +500,18 @@ class FileExtractor:
                     parts.append(slide_text)
                     parts.append("\n\n")
                 spans.append({"kind": "slide", "number": slide_number, "start": start, "end": start + len(slide_text)})
+            media = [
+                name
+                for name in archive.namelist()
+                if name.startswith("ppt/media/")
+                and name.lower().rsplit(".", 1)[-1] in {"png", "jpg", "jpeg", "webp", "tif", "tiff"}
+            ]
+            recovered, ocr_warnings = _ocr_blobs([archive.read(name) for name in media], "PPTX")
+            warnings.extend(ocr_warnings)
+            if recovered:
+                parts.append("\n[Image text]\n")
+                parts.extend(recovered)
+                parts.append("\n")
         finally:
             archive.close()
         text = "".join(parts).strip()
@@ -400,6 +524,7 @@ class FileExtractor:
                 "content_type": ctx.content_type,
                 "format": "pptx",
                 "slide_count": len(names),
+                "ocr_images": len(recovered),
             },
             spans=spans,
             warnings=warnings,

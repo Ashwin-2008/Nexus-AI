@@ -24,6 +24,11 @@ from app.services.connectors import (
     get_connector,
     parse_config,
 )
+from app.services.connector_presets import (
+    GuidedConfigError,
+    build_guided_connection,
+    guided_schema,
+)
 from app.services.connectors_service import (
     active_sync_job,
     reap_stale_sync_jobs,
@@ -54,6 +59,12 @@ class SourceUpdate(BaseModel):
     config: dict | None = None
     credentials: dict | None = None
     status: str | None = Field(None, pattern="^(active|disabled)$")
+
+
+class GuidedSourceCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    type: str = Field(..., min_length=1, max_length=32)
+    values: dict = {}
 
 
 class SourceRead(BaseModel):
@@ -186,6 +197,41 @@ def list_sources(
     return [_source_to_read(s) for s in rows]
 
 
+@router.get("/guided/schema")
+def guided_source_schema(current_user: User = Depends(get_current_user)):
+    """Form definition for provider-aware source creation (no secrets)."""
+    return guided_schema()
+
+
+@router.post("/guided", response_model=SourceRead, status_code=201)
+def create_guided_source(
+    body: GuidedSourceCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Create a source from only the questions a user can answer."""
+    try:
+        connector_type, config, credentials = build_guided_connection(body.type, body.values)
+    except GuidedConfigError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_config", "message": str(exc)})
+    except ConnectorError as exc:
+        raise HTTPException(status_code=400, detail={"code": "invalid_config", "message": str(exc)})
+
+    source = DataSource(
+        organization_id=current_user.organization_id,
+        created_by=current_user.id,
+        name=body.name.strip(),
+        type=connector_type,
+        status="active",
+        config=json.dumps(config, ensure_ascii=False),
+        credentials_encrypted=encrypt_credentials(credentials) if credentials else None,
+    )
+    db.add(source)
+    db.commit()
+    db.refresh(source)
+    return _source_to_read(source)
+
+
 @router.get("/{source_id}", response_model=SourceRead)
 def get_source(
     source_id: uuid.UUID,
@@ -280,8 +326,20 @@ def test_source(
     try:
         result = connector.test_connection(ctx)
     except ConnectorError as e:
+        source.status = "error"
+        source.last_error = str(e)[:2000]
+        db.commit()
         return {"ok": False, "error": str(e)}
-    return {"ok": bool(result.get("ok")), "type": source.type}
+    if not result.get("ok"):
+        message = str(result.get("error") or "Connection test returned no readable data")
+        source.status = "error"
+        source.last_error = message[:2000]
+        db.commit()
+        return {"ok": False, "error": message}
+    source.status = "active"
+    source.last_error = None
+    db.commit()
+    return {"ok": True, "type": source.type, "sample": result.get("sample")}
 
 
 def decrypt_credentials_safe(token: str | None) -> dict:

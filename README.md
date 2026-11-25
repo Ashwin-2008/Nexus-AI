@@ -33,9 +33,10 @@ through a chat UI, a shared RAG API, and specialist agents coordinated by a supe
 - **Organizations and access control** - every user belongs to one organization;
   roles (member, admin) decide which documents, sources and admin screens
   they can reach. The organization id always comes from the token, never from a request filter.
-- **Ingestion** - upload PDF, DOCX, XLSX, CSV, TXT, Markdown, HTML or JSON; add a web
-  page; or sync a database connector. Everything is parsed, deduplicated, versioned,
-  chunked, embedded and indexed by the same pipeline.
+- **Ingestion** - upload PDF, DOCX, XLSX, CSV, TXT, Markdown, HTML, JSON or images;
+  add a web page; or sync a database/mail/repository connector. Scans and screenshots
+  are OCR'd, and everything is parsed, deduplicated, versioned, chunked, embedded and
+  indexed by the same pipeline.
 - **Retrieval-augmented answers** - hybrid dense + lexical retrieval, reciprocal rank
   fusion, re-authorization of every candidate, reranking, parent-chunk expansion, a
   token-budgeted context, grounded generation, resolved citations and claim verification.
@@ -136,10 +137,11 @@ evaluation runs, and non-organization ingestion scopes.
 2. A `documents` row (content hash, version, scope) and an ingestion job are created.
 3. Dispatch: Celery task `process_document` on the `ingestion` queue when async is enabled;
    otherwise a FastAPI background task runs after the response returns.
-4. Pipeline: loader -> parser (text, layout, tables) -> normalizer (span remapping) ->
-   metadata extraction + content hash -> dedupe and version detection -> chunker
-   (recursive, token, sentence, semantic or parent-child) -> batched, validated embeddings
-   -> Qdrant upsert + `document_chunks` rows + `document_versions` entry.
+4. Pipeline: loader -> parser (text, layout, tables, OCR for images and scanned pages)
+   -> normalizer (span remapping) -> metadata extraction + content hash -> dedupe and
+   version detection -> chunker (recursive, token, sentence, semantic or parent-child)
+   -> contextual embeddings (document title + section heading + chunk) -> Qdrant upsert
+   + `document_chunks` rows + `document_versions` entry.
 5. Status is pollable; failures are recorded with a reason instead of silently disappearing.
 
 Connectors (`/api/v1/sources`) reuse the same pipeline: a sync pulls records, normalizes
@@ -156,12 +158,12 @@ POST /api/v1/rag/query  (or /chat, or a specialist agent)
   -> dense retrieval (Qdrant) + lexical BM25 (PostgreSQL chunk rows)
   -> reciprocal rank fusion
   -> live re-authorization of every candidate
-  -> reranking (heuristic, LLM, or cross-encoder)
+  -> reranking (`auto`: meaning-based LLM when configured, else heuristic)
   -> parent / neighbour context expansion
   -> dedupe, compression, token budget, injection neutralization
   -> grounded generation (LLM, or labelled extractive fallback)
   -> citation resolution and validation (fabricated ids dropped)
-  -> claim-level verification against the evidence
+  -> claim-level verification (lexical grounding + optional LLM entailment)
   -> { answer, citations, evidence, verification, timings, warnings, trace_id }
 ```
 
@@ -453,10 +455,11 @@ that config module.
 | Database | `DATABASE_URL` | `postgresql+psycopg://user:pass@host:5432/db?sslmode=require`; use the session pooler on port 5432 for Supabase |
 | Storage | `STORAGE_BACKEND`, `STORAGE_ROOT`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_STORAGE_BUCKET`, `MINIO_*` | `auto` picks Supabase when configured, then MinIO, then local disk |
 | Vector | `VECTOR_INDEX_BACKEND`, `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION` | `memory` is for tests only |
-| Embeddings | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_BATCH_SIZE` | `hashing` is deterministic and non-semantic |
+| Embeddings | `EMBEDDING_PROVIDER`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`, `EMBEDDING_BATCH_SIZE` | `hashing` is deterministic and non-semantic; real paraphrase search needs `openai_compatible` or `local` |
 | Generation | `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `LLM_MODEL`, `LLM_PROVIDER` | any OpenAI-compatible endpoint |
 | Chunking | `CHUNK_SIZE`, `CHUNK_OVERLAP`, `RAG_CHUNK_STRATEGY`, `RAG_PARENT_CHUNK_SIZE`, `RAG_CHILD_CHUNK_SIZE` | `recursive`, `token`, `sentence`, `semantic`, `parent_child` |
-| Retrieval | `RAG_RETRIEVAL_MODE`, `RAG_FINAL_TOP_K`, `RAG_RERANKER`, `RAG_QUERY_REWRITE`, `RAG_MULTI_QUERY`, `RAG_VERIFICATION` | defaults: hybrid, 8, heuristic |
+| Retrieval | `RAG_RETRIEVAL_MODE`, `RAG_FINAL_TOP_K`, `RAG_RERANKER`, `RAG_QUERY_REWRITE`, `RAG_MULTI_QUERY`, `RAG_VERIFICATION`, `LLM_VERIFICATION` | defaults: hybrid, 8, `auto`, verification on; `auto` uses the LLM only when configured |
+| OCR | `OCR_ENABLED`, `OCR_LANGUAGE`, `OCR_TESSERACT_CMD`, `OCR_MIN_TEXT_CHARS`, `OCR_MAX_PAGES` | Docker images install Tesseract; local installs need it on `PATH` |
 | Async | `REDIS_URL`, `INGESTION_USE_CELERY` | `rediss://` for Upstash; set `INGESTION_USE_CELERY=false` to run without a worker |
 | Security | `CORS_ORIGINS`, `RATE_LIMIT_ENABLED`, `AUTH_RATE_LIMIT`, `RAG_RATE_LIMIT_PER_MINUTE` | CORS entries are exact origins, comma separated, no trailing slash |
 | Monitoring | `LOG_LEVEL` | `/metrics` is always exposed as a plain Prometheus endpoint |
@@ -520,7 +523,8 @@ Product endpoints used by the UI:
 
 - `POST /auth/register`, `POST /auth/login`, `GET /auth/me`, `PATCH /auth/me`, `POST /auth/change-password`
 - `GET/POST /documents`, `POST /documents/upload`, `GET /documents/{id}`
-- `GET/POST /sources`, `POST /sources/{id}/sync`
+- `GET /sources/guided/schema`, `POST /sources/guided` (provider-aware forms)
+- `GET/POST /sources`, `POST /sources/{id}/sync`, `GET /sources/{id}/syncs`
 - `POST /chat/conversations`, `GET /chat/conversations`, `POST /chat/conversations/{id}/messages`
 - `GET /search`
 - `GET /agents/catalog`, `POST /agents/executions`, `GET /agents/executions/{id}`, `/agents/executions/{id}/steps`, `/agents/approvals`
@@ -545,15 +549,32 @@ Product endpoints used by the UI:
 - **`400 Disallowed CORS origin`** - the browser origin is not in `CORS_ORIGINS`. Copy the
   exact value of `location.origin` (scheme, host, port, no trailing slash) from the browser
   console, and restart the API after changing the variable.
-- **Uploads stay `pending`** - no worker is consuming the queue. Set
-  `INGESTION_USE_CELERY=false` for the in-process fallback, or start the worker with
-  `-Q ingestion,agents,default`.
+- **Uploads stay `pending`** - the API falls back to in-process processing when no
+  Celery worker answers. If jobs still stall, check the API log and either set
+  `INGESTION_USE_CELERY=false` or start the worker with `-Q ingestion,agents,default`.
+- **Email connector reports `AUTHENTICATIONFAILED`** - Gmail and Google Workspace do
+  not accept a normal account password over IMAP. Enable 2-Step Verification, create an
+  App Password at <https://myaccount.google.com/apppasswords>, and use that 16-character
+  password. If the account is managed by a school or company, the administrator may have
+  disabled App Passwords or IMAP; ask them to enable it or use OAuth2. SMTP credentials
+  are separate from IMAP and are not needed for mailbox synchronization.
 - **Port already in use** - change `--port 8000` / `--port 5173` and update
   `VITE_API_BASE_URL` and `VITE_PROXY_TARGET`.
 - **Answers are extractive, not generated** - no LLM key is configured, or the provider
   call failed; the RAG console shows `answer_mode` and warnings for the run.
 - **Semantic search returns nothing useful** - `EMBEDDING_PROVIDER=hashing` produces
-  non-semantic vectors. Configure a real provider and re-index.
+  non-semantic vectors. Configure `openai_compatible` (for example `text-embedding-3-small`,
+  1536 dimensions) or `local`, then re-index into a matching collection. With hashing,
+  retrieval is keyword-based even though LLM query expansion and reranking still help.
+- **A scanned PDF or image uploads but stays `pending` or fails** - OCR runs in the API
+  or worker process, not in the browser. The Docker images install Tesseract; for a local
+  Windows install set `OCR_TESSERACT_CMD` to `tesseract.exe`, or install Tesseract and
+  put it on `PATH`. `OCR_ENABLED=false` deliberately disables image ingestion.
+- **A source is created but syncing fails immediately** - the guided form only fills
+  protocol defaults; it cannot create provider credentials. Gmail needs a Google App
+  Password, Microsoft 365 usually needs OAuth2/admin consent, and databases need a
+  read-only account that can reach the host. The sync job records the real connector
+  error, and duplicate sync clicks return the active job instead of resetting counters.
 
 ## Documentation
 

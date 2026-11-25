@@ -314,6 +314,46 @@ export async function listSources(): Promise<DataSource[]> {
   return apiRequest<DataSource[]>('/sources')
 }
 
+export interface GuidedField {
+  key: string
+  label: string
+  type: 'text' | 'email' | 'password' | 'url' | 'number' | 'select'
+  required: boolean
+  placeholder: string
+  help: string
+  default: string
+  options?: Array<{ value: string; label: string }>
+}
+
+export interface GuidedPreset {
+  type: ConnectorType
+  label: string
+  description: string
+  fields: GuidedField[]
+  advanced_fields: GuidedField[]
+}
+
+export interface GuidedSchema {
+  presets: GuidedPreset[]
+  email_providers: Array<{ value: string; label: string; help: string }>
+  note: string
+}
+
+export async function getGuidedSchema(): Promise<GuidedSchema> {
+  return apiRequest<GuidedSchema>('/sources/guided/schema')
+}
+
+export async function createGuidedSource(
+  name: string,
+  type: ConnectorType,
+  values: Record<string, string>,
+): Promise<DataSource> {
+  return apiRequest<DataSource>('/sources/guided', {
+    method: 'POST',
+    body: JSON.stringify({ name, type, values }),
+  })
+}
+
 export async function createSource(
   name: string,
   type: ConnectorType,

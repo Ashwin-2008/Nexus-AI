@@ -9,6 +9,7 @@ from app.rag.loaders.docx_loader import DocxLoader
 from app.rag.loaders.email_loader import EmailFileLoader
 from app.rag.loaders.excel_loader import ExcelLoader
 from app.rag.loaders.html_loader import HtmlLoader
+from app.rag.loaders.image_loader import ImageLoader
 from app.rag.loaders.json_loader import JsonLoader
 from app.rag.loaders.markdown_loader import MarkdownLoader
 from app.rag.loaders.pdf_loader import PdfLoader
@@ -24,6 +25,7 @@ _LOADERS: tuple[type[BaseLoader], ...] = (
     ExcelLoader,
     PptxLoader,
     HtmlLoader,
+    ImageLoader,
     JsonLoader,
     EmailFileLoader,
     TextLoader,

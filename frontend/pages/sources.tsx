@@ -13,23 +13,29 @@ import {
   Server,
   Trash2,
   Unplug,
+  Upload,
   Waypoints,
 } from 'lucide-react'
 import {
   ConnectorType,
   DataSource,
+  GuidedField,
+  GuidedPreset,
+  GuidedSchema,
   SyncJob,
-  createSource,
+  createGuidedSource,
   deleteSource,
+  getGuidedSchema,
   listSourceSyncs,
   listSources,
   syncSource,
   testSource,
+  uploadDocument,
 } from '@/src/api'
 import { EmptyState, Field, Modal, PageHeader, StatCard, StatusBadge, formatDate, timeAgo } from '@/components/nx'
 import { Button } from '@/components/ui/button'
 import { Card } from '@/components/ui/card'
-import { Input, Select, Textarea } from '@/components/ui/input'
+import { Input, Select } from '@/components/ui/input'
 
 const CONNECTORS: Array<{
   type: ConnectorType
@@ -130,7 +136,7 @@ const CONNECTORS: Array<{
   {
     type: 'email',
     label: 'Email',
-    description: 'Index mailboxes for grounded knowledge retrieval.',
+    description: 'Index mailboxes for grounded knowledge retrieval. Gmail requires an App Password.',
     icon: <Mail />,
     config: `{
   "host": "imap.example.com",
@@ -156,16 +162,40 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
 
-function parseJson(value: string, label: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(value)
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${label} must be a JSON object`)
-  }
-  return parsed as Record<string, unknown>
-}
 
 function connectorMeta(type: ConnectorType) {
   return CONNECTORS.find((item) => item.type === type) ?? CONNECTORS[0]
+}
+
+function presetDefaults(preset?: GuidedPreset): Record<string, string> {
+  if (!preset) return {}
+  return Object.fromEntries(
+    [...preset.fields, ...preset.advanced_fields].map((field) => [field.key, field.default || '']),
+  )
+}
+
+function fieldInput(
+  field: GuidedField,
+  values: Record<string, string>,
+  onChange: (key: string, value: string) => void,
+) {
+  const value = values[field.key] ?? ''
+  const common = {
+    required: field.required,
+    placeholder: field.placeholder,
+    value,
+    onChange: (event: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => onChange(field.key, event.target.value),
+  }
+  if (field.type === 'select') {
+    return (
+      <Select {...common}>
+        {(field.options ?? []).map((option) => (
+          <option key={option.value} value={option.value}>{option.label}</option>
+        ))}
+      </Select>
+    )
+  }
+  return <Input {...common} type={field.type === 'password' ? 'password' : field.type} autoComplete={field.type === 'password' ? 'new-password' : undefined} />
 }
 
 export default function KnowledgeSources() {
@@ -196,8 +226,11 @@ export default function KnowledgeSources() {
 
   const [name, setName] = useState('')
   const [type, setType] = useState<ConnectorType>('website')
-  const [config, setConfig] = useState(CONNECTORS[0].config)
-  const [credentials, setCredentials] = useState(CONNECTORS[0].credentials)
+  const [guided, setGuided] = useState<GuidedSchema | null>(null)
+  const [values, setValues] = useState<Record<string, string>>({})
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
@@ -215,6 +248,24 @@ export default function KnowledgeSources() {
     void refresh()
   }, [refresh])
 
+  useEffect(() => {
+    let cancelled = false
+    void getGuidedSchema()
+      .then((schema) => {
+        if (cancelled) return
+        setGuided(schema)
+        const preset = schema.presets.find((item) => item.type === 'website') ?? schema.presets[0]
+        if (preset) {
+          setType(preset.type)
+          setValues(presetDefaults(preset))
+        }
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : 'Unable to load connection options')
+      })
+    return () => { cancelled = true }
+  }, [])
+
   const counts = useMemo(
     () => ({
       total: sources.length,
@@ -227,9 +278,13 @@ export default function KnowledgeSources() {
 
   function chooseType(next: ConnectorType) {
     setType(next)
-    const meta = connectorMeta(next)
-    setConfig(meta.config)
-    setCredentials(meta.credentials)
+    const preset = guided?.presets.find((item) => item.type === next)
+    setValues(presetDefaults(preset))
+    setAdvancedOpen(false)
+  }
+
+  function setValue(key: string, value: string) {
+    setValues((current) => ({ ...current, [key]: value }))
   }
 
   function openCreate() {
@@ -245,10 +300,11 @@ export default function KnowledgeSources() {
     setCreating(true)
     setError(null)
     try {
-      const source = await createSource(name.trim(), type, parseJson(config, 'Configuration'), parseJson(credentials, 'Credentials'))
+      const source = await createGuidedSource(name.trim(), type, values)
       setSources((current) => [source, ...current])
       setShowCreate(false)
-      setMessage(`${source.name} created. Test the connection before syncing.`)
+      setMessage(`${source.name} created. Testing the connection now...`)
+      await handleTest(source)
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to create source')
     } finally {
@@ -266,7 +322,9 @@ export default function KnowledgeSources() {
       setMessage(`${source.name}: connection validated`)
       await refresh()
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Connection test failed')
+      const failure = caught instanceof Error ? caught.message : 'Connection test failed'
+      await refresh()
+      setError(failure)
     } finally {
       setBusyId(null)
     }
@@ -328,6 +386,23 @@ export default function KnowledgeSources() {
     }
   }
 
+  async function handleUpload(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    setUploading(true)
+    setError(null)
+    setMessage(null)
+    try {
+      const document = await uploadDocument(file)
+      setMessage(`${document.filename} uploaded — extraction, chunking and indexing started.`)
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to upload document')
+    } finally {
+      setUploading(false)
+    }
+  }
+
   async function handleDelete(source: DataSource) {
     if (!window.confirm(`Disconnect ${source.name}? Connector-created documents will also be removed.`)) return
     setBusyId(source.id)
@@ -343,6 +418,15 @@ export default function KnowledgeSources() {
     }
   }
 
+  const currentPreset = guided?.presets.find((item) => item.type === type) ?? null
+  const mainFields: GuidedField[] = currentPreset ? [...currentPreset.fields] : []
+  let advancedFields: GuidedField[] = currentPreset ? [...currentPreset.advanced_fields] : []
+  if (type === 'email' && values.provider === 'custom') {
+    const imapField = advancedFields.find((field) => field.key === 'imap_host')
+    if (imapField && !mainFields.some((field) => field.key === 'imap_host')) mainFields.push(imapField)
+    advancedFields = advancedFields.filter((field) => field.key !== 'imap_host')
+  }
+
   return (
     <div className="nx-stack" style={{ gap: 22 }}>
       <PageHeader
@@ -351,6 +435,14 @@ export default function KnowledgeSources() {
         description="Connect websites, databases, repositories and mailboxes. Connector runs reuse the same validation, chunking and embedding pipeline as uploaded documents."
         actions={
           <>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.docx,.pptx,.xlsx,.csv,.txt,.md,.html,.json,.png,.jpg,.jpeg,.webp,.tif,.tiff"
+              style={{ display: 'none' }}
+              onChange={(event) => void handleUpload(event)}
+            />
+            <Button variant="secondary" onClick={() => fileInputRef.current?.click()} loading={uploading}><Upload size={14} /> Upload PDF</Button>
             <Button variant="secondary" onClick={() => void refresh()} loading={loading}><RefreshCw size={14} /> Refresh</Button>
             <Button onClick={openCreate}><Plus size={14} /> Connect source</Button>
           </>
@@ -429,29 +521,54 @@ export default function KnowledgeSources() {
             <Field label="Connection name">
               <Input required placeholder="Engineering handbook" value={name} onChange={(event) => setName(event.target.value)} />
             </Field>
-            <Field label="Connector type">
+            <Field label="What are you connecting?">
               <Select value={type} onChange={(event) => chooseType(event.target.value as ConnectorType)}>
                 {CONNECTORS.map((connector) => <option key={connector.type} value={connector.type}>{connector.label}</option>)}
               </Select>
             </Field>
           </div>
 
-          <p className="nx-xs nx-muted" style={{ margin: 0 }}>{connectorMeta(type).description}</p>
-
-          <Field label="Configuration JSON" hint="Validated by the backend connector; keep secrets out of this object.">
-            <Textarea value={config} onChange={(event) => setConfig(event.target.value)} spellCheck={false} style={{ fontFamily: 'monospace', fontSize: 11 }} />
-          </Field>
-          <Field label="Credentials JSON" hint="Encrypted at rest and never returned by the API.">
-            <Textarea value={credentials} onChange={(event) => setCredentials(event.target.value)} spellCheck={false} style={{ fontFamily: 'monospace', fontSize: 11 }} />
-          </Field>
+          {currentPreset ? (
+            <>
+              <p className="nx-xs nx-muted" style={{ margin: 0 }}>{currentPreset.description}</p>
+              <div className="nx-grid nx-grid--2" style={{ gap: 12 }}>
+                {mainFields.map((field) => (
+                  <Field key={field.key} label={field.label} hint={field.help || undefined}>
+                    {fieldInput(field, values, setValue)}
+                  </Field>
+                ))}
+              </div>
+              {advancedFields.length > 0 && (
+                <details
+                  className="nx-details"
+                  open={advancedOpen}
+                  onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
+                >
+                  <summary>Advanced settings (optional)</summary>
+                  <div className="nx-grid nx-grid--2" style={{ gap: 12, paddingTop: 12 }}>
+                    {advancedFields.map((field) => (
+                      <Field key={field.key} label={field.label} hint={field.help || undefined}>
+                        {fieldInput(field, values, setValue)}
+                      </Field>
+                    ))}
+                  </div>
+                </details>
+              )}
+              <p className="nx-xs nx-muted" style={{ margin: 0 }}>
+                Server ports, SSL, folders and processing settings are filled in automatically. Credentials are encrypted at rest.
+              </p>
+            </>
+          ) : (
+            <div className="nx-skeleton" style={{ height: 90 }} />
+          )}
 
           {error && <div className="nx-error">{error}</div>}
 
           <div className="nx-row nx-row--between">
-            <span className="nx-xs nx-muted">Creation does not test connectivity. Use Test after saving.</span>
+            <span className="nx-xs nx-muted">The connection is tested automatically after saving.</span>
             <div className="nx-row" style={{ gap: 8 }}>
               <Button type="button" variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-              <Button type="submit" loading={creating}>Create source</Button>
+              <Button type="submit" loading={creating} disabled={!currentPreset}>Create and test</Button>
             </div>
           </div>
         </form>

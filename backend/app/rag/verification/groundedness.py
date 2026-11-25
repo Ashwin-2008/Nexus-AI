@@ -19,6 +19,7 @@ from app.rag.types import Citation, ClaimVerification, EvidenceChunk, Verificati
 from app.rag.verification.claim_extraction import extract_claims
 from app.rag.verification.evidence_matching import match_claim
 from app.rag.verification.hallucination_checks import fabricated_citations
+from app.rag.verification.llm_verifier import verify_claims_with_llm
 
 
 class GroundednessVerifier:
@@ -43,6 +44,7 @@ class GroundednessVerifier:
             citation_errors.extend(errors)
 
         verified_claims: list[ClaimVerification] = []
+        ambiguous: list[tuple[int, str, list[EvidenceChunk]]] = []
         for claim in claims:
             cited = [by_index[index] for index in claim.citation_indices if index in by_index]
             if not claim.citation_indices:
@@ -79,6 +81,49 @@ class GroundednessVerifier:
                     unsupported_numbers=match.unsupported_numbers,
                 )
             )
+            # The lexical matcher is intentionally conservative. Paraphrases,
+            # numeric re-statements and sentence-level negation are exactly the
+            # cases it flags without being sure. Ask the configured LLM to audit
+            # only those claims, with their cited passages, and keep the
+            # deterministic result when no model is available.
+            if self.config.llm_verification and (
+                match.score < self.config.support_threshold
+                or match.contradictory
+                or match.negation_mismatch
+            ):
+                ambiguous.append((len(verified_claims) - 1, claim.text, cited))
+
+        refined = 0
+        if ambiguous:
+            verdicts = verify_claims_with_llm([(text, cited) for _, text, cited in ambiguous])
+            for local_index, verdict in verdicts.items():
+                if local_index >= len(ambiguous):
+                    continue
+                claim_index, _, _ = ambiguous[local_index]
+                target = verified_claims[claim_index]
+                mapped = {
+                    "supported": VERIFICATION_SUPPORTED,
+                    "partial": VERIFICATION_PARTIALLY_SUPPORTED,
+                    "unsupported": VERIFICATION_UNSUPPORTED,
+                    "conflicting": VERIFICATION_CONFLICTING,
+                }.get(verdict["verdict"])
+                if not mapped:
+                    continue
+                # Never let the LLM override a missing number in the cited
+                # passage. That is the one deterministic signal strong enough
+                # to keep a claim out of the fully-supported bucket.
+                if (
+                    mapped == VERIFICATION_SUPPORTED
+                    and target.unsupported_numbers
+                    and verdict["score"] < 0.8
+                ):
+                    mapped = VERIFICATION_PARTIALLY_SUPPORTED
+                target.status = mapped
+                target.support_score = round(max(target.support_score, verdict["score"]), 4)
+                reason = verdict.get("reason") or ""
+                if reason:
+                    target.reasons = [f"LLM entailment: {reason}"]
+                refined += 1
 
         unsupported = [claim.claim for claim in verified_claims if claim.status == VERIFICATION_UNSUPPORTED]
         conflicting = [claim.claim for claim in verified_claims if claim.status == VERIFICATION_CONFLICTING]
@@ -95,13 +140,18 @@ class GroundednessVerifier:
             insufficient_claims=insufficient,
             citation_errors=citation_errors,
             evidence_coverage=round(coverage, 4),
-            method="deterministic_lexical_grounding",
+            method=(
+                "deterministic_lexical_grounding+llm_entailment"
+                if refined
+                else "deterministic_lexical_grounding"
+            ),
             disclaimer=(
-                "Verification measures lexical support between the answer and cited passages. "
+                "Verification combines lexical support with an optional meaning-based LLM audit. "
                 "It is a review signal, not a guarantee against hallucination."
             ),
             notes=[
                 f"{len(verified_claims)} claim(s) extracted",
+                f"{refined} claim(s) re-checked by LLM entailment",
                 f"{len(citation_errors)} citation error(s)",
             ],
         )

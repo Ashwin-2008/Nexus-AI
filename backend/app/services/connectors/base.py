@@ -24,6 +24,7 @@ import hashlib
 import logging
 import re
 from abc import ABC, abstractmethod
+from itertools import islice
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any, Iterable
@@ -79,9 +80,22 @@ class BaseConnector(ABC):
         """Yield items. Raise ConnectorError on failure (never return silently empty on error)."""
 
     def test_connection(self, ctx: ConnectorContext) -> dict[str, Any]:
-        """Optional connectivity probe; default validates config only."""
+        """Fetch one real item so "connected" means the source actually works.
+
+        Validating fields alone produced false positives: unreachable websites,
+        revoked tokens and bad database passwords all looked connected. Connectors
+        with a cheaper probe (email login/folder select) override this.
+        """
         self.validate(ctx)
-        return {"ok": True}
+        try:
+            sample = next(iter(islice(self.fetch(ctx, max_items=1), 1)), None)
+        except ConnectorError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - normalize connector failures
+            raise ConnectorError(f"{self.type_name}: connection test failed: {exc}") from exc
+        if sample is None:
+            raise ConnectorError(f"{self.type_name}: connection test returned no items")
+        return {"ok": True, "sample": sample.title[:120]}
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +483,12 @@ class PostgresConnector(BaseConnector):
         if not url.startswith(("postgresql://", "postgres://", "postgresql+psycopg://")):
             raise ConnectorError("postgres connection_url must start with postgresql:// or postgres://")
         _require(ctx, "query")
-        _require(ctx, "query")
+
+    def test_connection(self, ctx: ConnectorContext) -> dict[str, Any]:
+        self.validate(ctx)
+        probe = ConnectorContext({**ctx.config, "max_rows": 1}, ctx.credentials, ctx.since_iso)
+        rows = _fetch_sql_rows(probe, "postgres")
+        return {"ok": True, "sample": rows[0][1][:120]}
 
     def fetch(self, ctx: ConnectorContext, max_items: int = 200) -> Iterable[ConnectorItem]:
         rows = _fetch_sql_rows(ctx, "postgres")
@@ -495,7 +514,12 @@ class MySQLConnector(BaseConnector):
         if not url.startswith(("mysql://", "mysql+pymysql://")):
             raise ConnectorError("mysql connection_url must start with mysql:// or mysql+pymysql://")
         _require(ctx, "query")
-        _require(ctx, "query")
+
+    def test_connection(self, ctx: ConnectorContext) -> dict[str, Any]:
+        self.validate(ctx)
+        probe = ConnectorContext({**ctx.config, "max_rows": 1}, ctx.credentials, ctx.since_iso)
+        rows = _fetch_sql_rows(probe, "mysql")
+        return {"ok": True, "sample": rows[0][1][:120]}
 
     def fetch(self, ctx: ConnectorContext, max_items: int = 200) -> Iterable[ConnectorItem]:
         try:
@@ -640,6 +664,48 @@ class EmailConnector(BaseConnector):
         if not isinstance(folder, str) or not folder:
             raise ConnectorError("email.folder invalid")
 
+    @staticmethod
+    def _normalise_password(host: str, password: str) -> str:
+        """Accept Gmail App Passwords pasted with their display spaces."""
+        password = str(password)
+        if "gmail" in host.lower() or "googlemail" in host.lower():
+            compact = "".join(password.split())
+            if compact != password and len(compact) == 16 and compact.isalnum():
+                return compact
+        return password
+
+    @staticmethod
+    def _login_error(host: str, error: Exception) -> ConnectorError:
+        text = str(error)
+        lower = text.lower()
+        if any(
+            marker in lower
+            for marker in (
+                "authenticationfailed",
+                "invalid credentials",
+                "authentication failed",
+                "application-specific password",
+                "app password",
+                "web login required",
+            )
+        ):
+            if "gmail" in host.lower() or "googlemail" in host.lower():
+                return ConnectorError(
+                    "email: Gmail rejected the login. Gmail IMAP does not accept your "
+                    "normal account password: enable 2-Step Verification, create a "
+                    "16-character App Password at https://myaccount.google.com/apppasswords, "
+                    "and use that here. For a Google Workspace account (for example "
+                    "@sece.ac.in), the administrator may have disabled App Passwords or "
+                    "IMAP; use OAuth2 or ask the administrator. "
+                    f"Server said: {text}"
+                )
+            return ConnectorError(
+                "email: IMAP authentication failed. If your provider uses two-step "
+                "verification, use an app-specific password instead of your normal "
+                f"account password. Server said: {text}"
+            )
+        return ConnectorError(f"email: cannot connect/login to {host}: {text}")
+
     def _connect(self, ctx: ConnectorContext):
         import imaplib
 
@@ -647,15 +713,17 @@ class EmailConnector(BaseConnector):
         port = int(ctx.config.get("port", 993))
         use_ssl = bool(ctx.config.get("use_ssl", True))
         timeout = float(ctx.config.get("timeout_seconds", 20) or 20)
+        username = str(ctx.credentials["username"]).strip()
+        password = self._normalise_password(host, str(ctx.credentials["password"]))
         try:
             imap = (
                 imaplib.IMAP4_SSL(host, port, timeout=timeout)
                 if use_ssl
                 else imaplib.IMAP4(host, port, timeout=timeout)
             )
-            login_result = imap.login(ctx.credentials["username"], ctx.credentials["password"])
+            login_result = imap.login(username, password)
         except Exception as e:  # noqa: BLE001
-            raise ConnectorError(f"email: cannot connect/login to {host}:{port}: {e}") from e
+            raise self._login_error(host, e) from e
         if login_result[0] != "OK":
             try:
                 imap.logout()

@@ -44,7 +44,8 @@ class RagConfig:
     hybrid_top_k: int = 16
     final_top_k: int = 8
     min_relevance: float = 0.0
-    reranker: str = "heuristic"
+    reranker: str = "auto"
+    llm_verification: bool = True
     rerank_top_k: int = 8
     query_rewrite: bool = True
     multi_query: bool = True
@@ -92,7 +93,7 @@ class RagConfig:
         if mode not in RETRIEVAL_MODES:
             warnings.append(f"unknown rag_retrieval_mode '{mode}', using hybrid")
             mode = "hybrid"
-        reranker = (settings.rag_reranker or "heuristic").strip().lower()
+        reranker = (settings.rag_reranker or "auto").strip().lower()
 
         config = cls(
             chunk_strategy=strategy,
@@ -108,6 +109,7 @@ class RagConfig:
             final_top_k=settings.rag_final_top_k or settings.rag_max_context_chunks,
             min_relevance=settings.rag_min_relevance,
             reranker=reranker,
+            llm_verification=settings.llm_verification,
             rerank_top_k=settings.rag_rerank_top_k,
             query_rewrite=settings.rag_query_rewrite,
             multi_query=settings.rag_multi_query,
@@ -199,7 +201,8 @@ class RagConfig:
                 "enabled": self.verification,
                 "support_threshold": self.support_threshold,
                 "partial_threshold": self.partial_threshold,
-                "method": "deterministic lexical grounding (not a certainty guarantee)",
+                "llm_entailment": self.llm_verification,
+                "method": "deterministic lexical grounding + optional LLM entailment (not a certainty guarantee)",
             },
             "ingestion": {
                 "max_document_bytes": self.max_document_bytes,

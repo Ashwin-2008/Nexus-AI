@@ -126,6 +126,27 @@ def _org_chunks(
     return rows
 
 
+def _chunk_context(chunk: DocumentChunk, doc: Document) -> str:
+    parts: list[str] = []
+    heading = getattr(chunk, "section_heading", None)
+    if heading:
+        parts.append(str(heading))
+    try:
+        metadata = json.loads(doc.doc_metadata) if doc.doc_metadata else {}
+    except (TypeError, ValueError):
+        metadata = {}
+    if isinstance(metadata, dict):
+        for key in ("document_title", "title", "subject", "summary", "semantic_profile", "keywords"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, list):
+                parts.extend(str(item) for item in value if str(item).strip())
+            elif isinstance(value, dict):
+                parts.extend(str(item) for item in value.values() if str(item).strip())
+    return " ".join(parts)
+
+
 def lexical_search(
     db: Session,
     organization_id,
@@ -157,8 +178,13 @@ def lexical_search(
         return []
     k1, b = 1.5, 0.75
     doc_tokens: list[list[str]] = []
-    for chunk, _doc in rows:
-        doc_tokens.append(_tokenize(chunk.text))
+    for chunk, doc in rows:
+        # Include the section heading and document title/summary in the
+        # lexical document. The cited text stays exactly the chunk text, but
+        # a query that names the section or the document topic can now find
+        # the passage even when the wording differs.
+        context = _chunk_context(chunk, doc)
+        doc_tokens.append(_tokenize(chunk.text) + (_tokenize(context) if context else []))
     query_tokens = _tokenize(query)
     if not query_tokens:
         return []

@@ -79,7 +79,15 @@ class Settings(BaseSettings):
     rag_final_top_k: int = 8
     rag_min_relevance: float = 0.0
     # Reranker: heuristic | llm | cross_encoder | none | auto
-    rag_reranker: str = "heuristic"
+    rag_reranker: str = "auto"
+    llm_verification: bool = True
+    # OCR for scans, screenshots and images embedded in PDF/DOCX/PPTX.
+    ocr_enabled: bool = True
+    ocr_language: str = "eng"
+    ocr_timeout_seconds: int = 45
+    ocr_min_text_chars: int = 25
+    ocr_max_pages: int = 30
+    ocr_tesseract_cmd: str = ""
     rag_rerank_top_k: int = 8
     rag_query_rewrite: bool = True
     rag_multi_query: bool = True

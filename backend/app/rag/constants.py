@@ -46,6 +46,12 @@ SUPPORTED_EXTENSIONS = (
     ".htm",
     ".json",
     ".eml",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".tif",
+    ".tiff",
 )
 
 # Content types accepted by upload validation when the extension is supported.
@@ -62,6 +68,10 @@ SUPPORTED_CONTENT_TYPES = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     "application/octet-stream",
+    "image/png",
+    "image/jpeg",
+    "image/webp",
+    "image/tiff",
 )
 
 # Prompt-injection defence: retrieved documents are untrusted data. These

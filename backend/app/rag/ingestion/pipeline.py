@@ -105,6 +105,12 @@ class IngestionPipeline:
         )
         timings["parse_ms"] = _ms(stage)
 
+        # Prefer the user/connector supplied title over the filename the parser
+        # infers. It is used for citation labels and contextual embeddings.
+        stored_title = existing_meta.get("document_title") or existing_meta.get("title")
+        if stored_title:
+            parsed.title = str(stored_title)
+
         digest = file_hash(data)
         metadata = enrich_metadata(
             parsed,
@@ -147,8 +153,13 @@ class IngestionPipeline:
             raise ChunkingError("chunking produced no indexable chunks")
 
         stage = time.monotonic()
+        # Embed each chunk with its document title and section heading. The
+        # stored/cited text stays the original passage, but the vector and the
+        # lexical index both see the surrounding meaning instead of an isolated
+        # fragment. This is what makes section-level paraphrases retrievable.
+        embedding_texts = [_contextual_embedding_text(chunk, parsed) for chunk in indexable]
         try:
-            vectors = self.embedder.embed_documents([chunk.text for chunk in indexable])
+            vectors = self.embedder.embed_documents(embedding_texts)
         except EmbeddingUnavailableError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -241,6 +252,18 @@ class IngestionPipeline:
             metadata=metadata,
             timings=timings,
         )
+
+
+def _contextual_embedding_text(chunk, parsed) -> str:
+    """Prefix a chunk with its document/section context for embedding."""
+    title = str(parsed.title or "").strip()
+    heading = str(chunk.section_heading or "").strip()
+    prefix = "Document: " + title if title else ""
+    if heading and heading.lower() != title.lower():
+        prefix = (prefix + "\nSection: " + heading).strip()
+    if not prefix:
+        return chunk.text
+    return f"{prefix}\n\n{chunk.text}"
 
 
 def _ms(started: float) -> int:

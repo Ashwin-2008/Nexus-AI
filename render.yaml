@@ -36,6 +36,14 @@ envVarGroups:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      - key: RAG_RERANKER
+        value: auto
+      - key: LLM_VERIFICATION
+        value: "true"
+      - key: OCR_ENABLED
+        value: "true"
+      - key: OCR_LANGUAGE
+        value: eng
 
 services:
   - type: web
