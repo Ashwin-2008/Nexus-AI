@@ -53,16 +53,15 @@ test_name = "Integration Tester"
 r = requests.post(f"{API}/auth/register", json={
     "email": test_email,
     "password": test_password,
-    "name": test_name,
+    "full_name": test_name,
+    "organization_name": "Integration Test Organization",
 }, timeout=10)
 check("Register new user (201)", r.status_code == 201, f"got {r.status_code}")
 
 token = None
 if r.status_code == 201:
     body = r.json()
-    token = body.get("access_token")
-    check("Register returns access_token", token is not None)
-    check("Register returns user object", "user" in body)
+    check("Register returns user object", body.get("email") == test_email)
 
 r = requests.post(f"{API}/auth/login", json={
     "email": test_email,
