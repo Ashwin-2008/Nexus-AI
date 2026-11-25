@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import os
 from collections.abc import Generator
@@ -9,14 +9,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
-# Configure test environment before importing app modules
-os.environ.setdefault("SECRET_KEY", "test-secret-key")
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///:memory:")
-os.environ.setdefault("INGESTION_USE_CELERY", "false")
-os.environ.setdefault("STORAGE_BACKEND", "local")
-os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
-os.environ.setdefault("VECTOR_INDEX_BACKEND", "memory")
-os.environ.setdefault("EMBEDDING_PROVIDER", "hashing")
+# Configure test environment before importing app modules.
+# Assigned, not setdefault: a shell that exports the project's .env must never
+# point the suite at the real PostgreSQL database, Supabase bucket or Redis.
+os.environ["SECRET_KEY"] = "test-secret-key"
+os.environ["DATABASE_URL"] = "sqlite+pysqlite:///:memory:"
+os.environ["INGESTION_USE_CELERY"] = "false"
+os.environ["STORAGE_BACKEND"] = "local"
+os.environ["RATE_LIMIT_ENABLED"] = "false"
+os.environ["VECTOR_INDEX_BACKEND"] = "memory"
+os.environ["EMBEDDING_PROVIDER"] = "hashing"
+os.environ["SUPABASE_URL"] = ""
+os.environ["SUPABASE_SERVICE_ROLE_KEY"] = ""
 
 from app.core.config import settings  # noqa: E402
 

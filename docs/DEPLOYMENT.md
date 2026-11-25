@@ -121,7 +121,7 @@ connector credentials stored in PostgreSQL are encrypted with it.
 | Service | Type | Dockerfile | Notes |
 |---|---|---|---|
 | `nexus-api` | Web | `backend/Dockerfile` | Health check `/api/v1/health`, listens on `$PORT` |
-| `nexus-worker` | Worker | `backend/Dockerfile.worker` | Celery queue `ingestion,default` |
+| `nexus-worker` | Worker | `backend/Dockerfile.worker` | Celery queues `ingestion,agents,default` |
 
 Background workers are a **paid** Render plan feature; the free plan only runs
 web services. If the worker cannot run, set `INGESTION_USE_CELERY=false` so
@@ -129,6 +129,18 @@ ingestion executes in the API process (documented, synchronous fallback).
 
 Add a **Pre-Deploy Command** of `alembic upgrade head` if you deploy more than
 one API instance, so migrations run once instead of per instance.
+
+If you deploy with Render's **Python** runtime instead of the blueprint's
+Dockerfile, Render's default start command skips migrations, so a fresh database
+stays empty and every write fails with `relation "users" does not exist`. Use:
+
+| Setting | Value |
+|---|---|
+| Root Directory | `backend` |
+| Build Command | `pip install -r requirements.txt` |
+| Start Command | `alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT` |
+
+The same env group applies; only the container command differs.
 
 Required API environment:
 
@@ -164,12 +176,20 @@ variables through `fromGroup: nexus-shared`, plus `WORKER_CONCURRENCY=2`.
 VITE_API_BASE_URL=https://<your-api>.onrender.com/api/v1
 ```
 
-4. Add the Vercel production (and preview) origins to `CORS_ORIGINS` on Render.
-   Preview URLs change per deployment; either add wildcard patterns you
-   actually use or send preview traffic through the production API explicitly.
+4. Add the Vercel production and preview origins to `CORS_ORIGINS` on Render as
+   exact `scheme://host` entries, comma separated, no trailing slash and no
+   wildcards. A miss shows up in the browser as `Disallowed CORS origin` (HTTP
+   400 on the preflight, no `Access-Control-Allow-Origin`). Vercel preview URLs
+   change per deployment (`<project>-<hash>-<team>.vercel.app`), so whitelist the
+   stable production domain and only the preview hosts you actually test from.
 
 `frontend/src/api.ts` reads `VITE_API_BASE_URL` at build time; without it the
-client falls back to `/api/v1`, which only works behind the compose nginx.
+client falls back to `/api/v1`, which only works behind the compose nginx. The
+value must end with `/api/v1` and without a trailing slash — Vite env changes
+only take effect after a new deployment. `frontend/src/api.ts` now normalises the
+value: trailing slashes are stripped and a bare origin
+(`https://<api>.onrender.com`) gets `/api/v1` appended, so a half-configured
+variable degrades to the correct URL instead of `//auth/login`.
 
 ## 7. Grafana Cloud — monitoring
 

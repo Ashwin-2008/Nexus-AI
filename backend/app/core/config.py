@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import List, Optional
 
 from pydantic import field_validator
@@ -140,7 +141,29 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins_list(self) -> List[str]:
-        return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
+        """Parse CORS_ORIGINS tolerantly.
+
+        Accepts a comma separated list, a JSON array, quoted entries and entries
+        with a trailing slash, because every one of those has been pasted into a
+        hosting dashboard at some point and silently disabled CORS.
+        """
+        raw = (self.cors_origins or "").strip()
+        # Tolerate "CORS_ORIGINS=https://..." pasted into a dashboard value field.
+        if raw.lower().startswith("cors_origins="):
+            raw = raw.split("=", 1)[1].strip()
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed = json.loads(raw)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                raw = ",".join(str(item) for item in parsed)
+        origins: List[str] = []
+        for item in raw.split(","):
+            origin = item.strip().strip("'\"").strip().rstrip("/")
+            if origin and origin not in origins:
+                origins.append(origin)
+        return origins
 
 
 settings = Settings()

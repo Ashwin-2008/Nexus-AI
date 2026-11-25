@@ -71,6 +71,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       # Managed Redis (Upstash): set REDIS_URL in .env — it wins over this default.
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      INGESTION_USE_CELERY: ${INGESTION_USE_CELERY:-true}
       SECRET_KEY: ${JWT_SECRET:?JWT_SECRET is required}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${JWT_EXPIRE_MINUTES:-60}
       CORS_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost,http://localhost:3000}
@@ -119,6 +120,7 @@ services:
       QDRANT_URL: http://qdrant:6333
       # Managed Redis (Upstash): set REDIS_URL in .env — it wins over this default.
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
+      INGESTION_USE_CELERY: ${INGESTION_USE_CELERY:-true}
       SECRET_KEY: ${JWT_SECRET:?JWT_SECRET is required}
       # Document storage (must match backend settings)
       STORAGE_BACKEND: ${STORAGE_BACKEND:-auto}

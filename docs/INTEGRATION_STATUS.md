@@ -56,7 +56,7 @@ Last updated: 2026-11-21 (RAG subsystem integration; Supabase storage + Render/V
 ```
 cd backend
 python -m pytest -q
-# 140 passed, 1 qdrant-client compatibility warning
+# 148 passed, 1 qdrant-client compatibility warning
 ```
 
 Environment uses SQLite in-memory, `INGESTION_USE_CELERY=false`, `STORAGE_BACKEND=local`, `VECTOR_INDEX_BACKEND=memory`, `EMBEDDING_PROVIDER=hashing`.

@@ -15,4 +15,4 @@ COPY . .
 
 # Shell form so ${LOG_LEVEL}/${WORKER_CONCURRENCY} expand at container runtime
 CMD celery -A app.worker.celery_app worker --loglevel="${LOG_LEVEL:-info}" \
-    --concurrency="${WORKER_CONCURRENCY:-4}" -Q ingestion,default
+    --concurrency="${WORKER_CONCURRENCY:-4}" -Q ingestion,agents,default

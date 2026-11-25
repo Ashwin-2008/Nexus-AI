@@ -1,4 +1,14 @@
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1'
+// VITE_API_BASE_URL is baked in at build time by Vite. Normalise it so a bare
+// origin ("https://api.example.com" or ".../") still targets the API prefix, and
+// a trailing slash can never produce "//auth/login".
+function resolveApiBase(raw: string | undefined): string {
+  const trimmed = (raw || '/api/v1').trim().replace(/\/+$/, '')
+  const isBareOrigin = /^https?:\/\/[^/]+$/i.test(trimmed)
+  const base = isBareOrigin ? `${trimmed}/api/v1` : trimmed
+  return base || '/api/v1'
+}
+
+export const API_BASE_URL = resolveApiBase(import.meta.env.VITE_API_BASE_URL)
 
 export interface User {
   id: string

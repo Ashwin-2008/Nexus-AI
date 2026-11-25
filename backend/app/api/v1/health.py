@@ -22,12 +22,19 @@ except Exception:  # pragma: no cover
     QdrantClient = None
 
 
+# Last database failure as an exception class name (never the DSN or message).
+_db_error: str | None = None
+
+
 def _check_db() -> str:
+    global _db_error
     try:
         with engine.connect() as conn:
             conn.exec_driver_sql("SELECT 1")
+        _db_error = None
         return "healthy"
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        _db_error = type(exc).__name__
         return "unhealthy"
 
 
@@ -112,7 +119,13 @@ async def health() -> Dict[str, Any]:
         overall = "unhealthy"
     elif any(v == "unhealthy" for k, v in services.items() if k != "api"):
         overall = "degraded"
-    return {"status": overall, "services": services}
+    payload: Dict[str, Any] = {"status": overall, "services": services}
+    if services["database"] != "healthy" and _db_error:
+        # Class name only: ProgrammingError means a malformed URL/parameter
+        # (for example ?pgbouncer=true), OperationalError means host, credentials
+        # or network. No DSN, user or message is exposed.
+        payload["detail"] = {"database": _db_error}
+    return payload
 
 
 @router.get("/system/capabilities")
